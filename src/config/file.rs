@@ -1,6 +1,8 @@
-use std::{env, fs, io, path::PathBuf};
+use std::{collections::HashMap, env, fs, io, path::PathBuf};
 
 use tui::style::Color;
+
+use crate::keys::{Action, Key, Keymap};
 
 /// Settings from the configuration file, `$XDG_CONFIG_HOME/parui/config` or by default
 /// `~/.config/parui/config`. Each line is `key = value`, and lines starting with `#` are comments.
@@ -10,6 +12,7 @@ pub struct Settings {
     pub notes: bool,
     pub notes_height: NotesHeight,
     pub colors: Colors,
+    pub keymap: Keymap,
 }
 
 impl Default for Settings {
@@ -20,6 +23,7 @@ impl Default for Settings {
             notes: true,
             notes_height: NotesHeight::Percent(33),
             colors: Colors::default(),
+            keymap: Keymap::default(),
         }
     }
 }
@@ -95,15 +99,25 @@ pub fn load() -> Result<Settings, String> {
         return Ok(Settings::default());
     };
     match fs::read_to_string(&path) {
-        Ok(content) => parse(&content).map_err(|err| format!("{}:{err}", path.display())),
+        Ok(content) => parse(&content).map_err(|err| match err.line {
+            Some(line) => format!("{}:{line}: {}", path.display(), err.message),
+            None => format!("{}: {}", path.display(), err.message),
+        }),
         Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(Settings::default()),
         Err(err) => Err(format!("{}: {err}", path.display())),
     }
 }
 
-/// Parses a configuration file. Errors start with the line number they are about.
-fn parse(content: &str) -> Result<Settings, String> {
+#[derive(Debug)]
+struct ParseError {
+    /// Line the error is about, if it is about a single one.
+    line: Option<usize>,
+    message: String,
+}
+
+fn parse(content: &str) -> Result<Settings, ParseError> {
     let mut settings = Settings::default();
+    let mut keys = HashMap::new();
 
     for (idx, line) in content.lines().enumerate() {
         let line = line.trim();
@@ -111,7 +125,10 @@ fn parse(content: &str) -> Result<Settings, String> {
             continue;
         }
 
-        let err = |msg: String| format!("{}: {msg}", idx + 1);
+        let err = |message: String| ParseError {
+            line: Some(idx + 1),
+            message,
+        };
         let Some((key, value)) = line.split_once('=') else {
             return Err(err(format!("expected `key = value`, found `{line}`")));
         };
@@ -148,6 +165,19 @@ fn parse(content: &str) -> Result<Settings, String> {
                 settings.notes_height =
                     height.ok_or_else(|| invalid("a number of rows or a percentage like 33%"))?;
             }
+            _ if key.starts_with("key-") => {
+                let Some(action) = Action::from_name(&key["key-".len()..]) else {
+                    return Err(err(format!("unknown key `{key}`")));
+                };
+                let parsed = value
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|key| !key.is_empty())
+                    .map(Key::parse)
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|msg| err(format!("invalid {key}: {msg}")))?;
+                keys.insert(action, parsed);
+            }
             _ => {
                 let color = match key {
                     "color-upgradable" => &mut settings.colors.upgradable,
@@ -163,6 +193,11 @@ fn parse(content: &str) -> Result<Settings, String> {
             }
         }
     }
+
+    settings.keymap = Keymap::new(keys).map_err(|message| ParseError {
+        line: None,
+        message,
+    })?;
 
     Ok(settings)
 }
@@ -236,17 +271,27 @@ mod tests {
             parse("notes-height = 50%").unwrap().notes_height,
             NotesHeight::Percent(50)
         );
+
+        let keymap = parse("key-ignore = I, alt+x\nkey-note =").unwrap().keymap;
+        assert_eq!(keymap.label(Action::Ignore).as_deref(), Some("I"));
+        assert_eq!(keymap.label(Action::Note), None);
     }
 
     #[test]
     fn reports_errors_with_line_numbers() {
-        assert_eq!(parse("\nfoo = bar").err().unwrap(), "2: unknown key `foo`");
-        assert!(
-            parse("reopen = maybe")
-                .err()
-                .unwrap()
-                .starts_with("1: invalid reopen")
+        let err = parse("\nfoo = bar").err().unwrap();
+        assert_eq!(
+            (err.line, err.message.as_str()),
+            (Some(2), "unknown key `foo`")
         );
+        let err = parse("reopen = maybe").err().unwrap();
+        assert_eq!(err.line, Some(1));
+        assert!(err.message.starts_with("invalid reopen"));
+        assert!(parse("key-fly = x").is_err());
+        assert!(parse("key-ignore = esc").is_err());
+        let err = parse("key-ignore = n").err().unwrap();
+        assert_eq!(err.line, None);
+        assert!(err.message.contains("ignore and note"), "{}", err.message);
         assert!(parse("color-installed = #12345").is_err());
         assert!(parse("color-installed = purple").is_err());
         assert!(parse("notes-height = 0%").is_err());

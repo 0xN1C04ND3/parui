@@ -15,7 +15,7 @@ Options:
         Print this help and exit
 Configuration:
     $XDG_CONFIG_HOME/parui/config, by default ~/.config/parui/config
-    See the README for its settings
+    See the README for its settings, which include the keys of select mode
 Keybinds:
     Both:
        <Escape>

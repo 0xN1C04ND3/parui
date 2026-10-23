@@ -21,6 +21,7 @@ use interface::{
     Upgrade, format_results, get_info, group_packages, installed_names, list, list_upgradable,
     search,
 };
+use keys::Action;
 use message::Message;
 use mode::Mode;
 use nohash_hasher::{IntMap, IntSet};
@@ -39,6 +40,7 @@ use tui::{
 mod config;
 mod ignore;
 mod interface;
+mod keys;
 mod macros;
 mod matcher;
 mod message;
@@ -63,6 +65,7 @@ async fn main() -> Result<(), io::Error> {
     let reopen = settings.reopen;
     // `None` when notes are disabled.
     let notes_height = settings.notes.then_some(settings.notes_height);
+    let keymap = settings.keymap;
 
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -324,21 +327,26 @@ async fn main() -> Result<(), io::Error> {
                 };
 
                 // TODO: Use render_widget_ref when it is ready.
-                let hint = |key: &'static str, color: Color, action: &'static str| {
-                    [
-                        Span::styled(key, Style::new().fg(color).add_modifier(Modifier::BOLD)),
-                        Span::raw(action),
-                    ]
-                };
-                let separator = || Span::styled(" · ", Style::new().fg(Color::DarkGray));
                 let mut hints = Vec::new();
-                hints.extend(hint("Enter", Color::Green, " install/upgrade"));
-                hints.push(separator());
-                hints.extend(hint("R", Color::Red, " remove"));
-                hints.push(separator());
-                hints.extend(hint("U", Color::Yellow, " upgrade all"));
-                hints.push(separator());
-                hints.extend(hint("x", Color::Magenta, " ignore"));
+                for (action, color, description) in [
+                    (Action::Install, Color::Green, " install/upgrade"),
+                    (Action::Remove, Color::Red, " remove"),
+                    (Action::UpgradeAll, Color::Yellow, " upgrade all"),
+                    (Action::Ignore, Color::Magenta, " ignore"),
+                ] {
+                    // Unbound actions have no key to show.
+                    let Some(key) = keymap.label(action) else {
+                        continue;
+                    };
+                    if !hints.is_empty() {
+                        hints.push(Span::styled(" · ", Style::new().fg(Color::DarkGray)));
+                    }
+                    hints.push(Span::styled(
+                        key,
+                        Style::new().fg(color).add_modifier(Modifier::BOLD),
+                    ));
+                    hints.push(Span::raw(description));
+                }
                 let hints = Paragraph::new(Line::from(hints)).wrap(Wrap { trim: true });
 
                 let text_width = size.width / 2 - 5;
@@ -399,11 +407,16 @@ async fn main() -> Result<(), io::Error> {
                             None => " Notes ".bold(),
                         });
                     if notes_package.is_some() {
-                        notes_block = notes_block.title_bottom(if note_editor.is_some() {
-                            " Esc: save "
+                        let help = if note_editor.is_some() {
+                            Some(" Esc: save ".to_owned())
                         } else {
-                            " n: edit "
-                        });
+                            keymap
+                                .label(Action::Note)
+                                .map(|key| format!(" {key}: edit "))
+                        };
+                        if let Some(help) = help {
+                            notes_block = notes_block.title_bottom(help);
+                        }
                     }
                     f.render_widget(Clear, notes_area);
                     f.render_widget(notes_block, notes_area);
@@ -702,13 +715,19 @@ async fn main() -> Result<(), io::Error> {
                     redraw.store(true, Ordering::SeqCst);
                 }
                 Mode::Select => match k.code {
-                    KeyCode::Up | KeyCode::Char('k') => {
-                        if k.modifiers == KeyModifiers::CONTROL {
-                            if info_scroll > 0 {
-                                info_scroll -= 1;
-                                redraw.store(true, Ordering::SeqCst);
-                            }
-                        } else {
+                    KeyCode::Esc => {
+                        insert_pos = query.len() as u16;
+                        redraw.store(true, Ordering::SeqCst);
+                        mode.store(Mode::Insert, Ordering::SeqCst);
+                    }
+                    KeyCode::Char('c') if k.modifiers.contains(KeyModifiers::CONTROL) => {
+                        disable_raw_mode()?;
+                        stream_exit!(terminal.backend_mut())?;
+
+                        return Ok(());
+                    }
+                    _ => match keymap.action(&k) {
+                        Some(Action::Up) => {
                             if current > 0 {
                                 current -= 1;
                             } else {
@@ -717,14 +736,7 @@ async fn main() -> Result<(), io::Error> {
                             info.lock().clear();
                             redraw.store(true, Ordering::SeqCst);
                         }
-                    }
-                    KeyCode::Down | KeyCode::Char('j') => {
-                        if k.modifiers == KeyModifiers::CONTROL {
-                            if !info.lock().is_empty() {
-                                info_scroll += 1;
-                                redraw.store(true, Ordering::SeqCst);
-                            }
-                        } else {
+                        Some(Action::Down) => {
                             let result_count = shown_len();
 
                             if result_count > 1 && current < result_count - 1 {
@@ -735,53 +747,58 @@ async fn main() -> Result<(), io::Error> {
                             info.lock().clear();
                             redraw.store(true, Ordering::SeqCst);
                         }
-                    }
-                    KeyCode::Esc => {
-                        insert_pos = query.len() as u16;
-                        redraw.store(true, Ordering::SeqCst);
-                        mode.store(Mode::Insert, Ordering::SeqCst);
-                    }
-                    KeyCode::Left | KeyCode::PageUp | KeyCode::Char('h') => {
-                        let result_count = shown_len() - 1;
-                        if result_count > per_page {
-                            if current >= per_page {
-                                current -= per_page;
-                            } else if current.is_multiple_of(per_page) {
-                                current = result_count / per_page * per_page;
-                            } else {
-                                current = current / per_page * per_page;
+                        Some(Action::InfoUp) => {
+                            if info_scroll > 0 {
+                                info_scroll -= 1;
+                                redraw.store(true, Ordering::SeqCst);
                             }
-                            info.lock().clear();
-                            redraw.store(true, Ordering::SeqCst);
                         }
-                    }
-                    KeyCode::Right | KeyCode::PageDown | KeyCode::Char('l') => {
-                        let shown_len = shown_len();
+                        Some(Action::InfoDown) => {
+                            if !info.lock().is_empty() {
+                                info_scroll += 1;
+                                redraw.store(true, Ordering::SeqCst);
+                            }
+                        }
+                        Some(Action::PageUp) => {
+                            let result_count = shown_len() - 1;
+                            if result_count > per_page {
+                                if current >= per_page {
+                                    current -= per_page;
+                                } else if current.is_multiple_of(per_page) {
+                                    current = result_count / per_page * per_page;
+                                } else {
+                                    current = current / per_page * per_page;
+                                }
+                                info.lock().clear();
+                                redraw.store(true, Ordering::SeqCst);
+                            }
+                        }
+                        Some(Action::PageDown) => {
+                            let shown_len = shown_len();
 
-                        if shown_len > per_page {
-                            if current == shown_len - 1 {
-                                current = 0;
-                            } else if current + per_page > shown_len - 1 {
-                                current = shown_len - 1;
-                            } else {
-                                current += per_page;
+                            if shown_len > per_page {
+                                if current == shown_len - 1 {
+                                    current = 0;
+                                } else if current + per_page > shown_len - 1 {
+                                    current = shown_len - 1;
+                                } else {
+                                    current += per_page;
+                                }
+                                info.lock().clear();
+                                redraw.store(true, Ordering::SeqCst);
                             }
+                        }
+                        Some(Action::Top) if current != 0 => {
                             info.lock().clear();
+                            current = 0;
                             redraw.store(true, Ordering::SeqCst);
                         }
-                    }
-                    KeyCode::Home | KeyCode::Char('g') if current != 0 => {
-                        info.lock().clear();
-                        current = 0;
-                        redraw.store(true, Ordering::SeqCst);
-                    }
-                    KeyCode::End | KeyCode::Char('G') if current != shown_len() - 1 => {
-                        info.lock().clear();
-                        current = shown_len() - 1;
-                        redraw.store(true, Ordering::SeqCst);
-                    }
-                    KeyCode::Char(c) => match c {
-                        ' ' => {
+                        Some(Action::Bottom) if current != shown_len() - 1 => {
+                            info.lock().clear();
+                            current = shown_len() - 1;
+                            redraw.store(true, Ordering::SeqCst);
+                        }
+                        Some(Action::Select) => {
                             let real_current = real_idx(current);
                             if selected.contains(&real_current) {
                                 selected.remove(&real_current);
@@ -790,31 +807,29 @@ async fn main() -> Result<(), io::Error> {
                             }
                             redraw.store(true, Ordering::SeqCst);
                         }
-                        'n' if notes_height.is_some() => {
+                        Some(Action::ClearSelection) => {
+                            selected.clear();
+                            redraw.store(true, Ordering::SeqCst);
+                        }
+                        Some(Action::Search) => {
+                            insert_pos = query.len() as u16;
+                            redraw.store(true, Ordering::SeqCst);
+                            mode.store(Mode::Insert, Ordering::SeqCst);
+                        }
+                        Some(Action::Quit) => {
+                            disable_raw_mode()?;
+                            stream_exit!(terminal.backend_mut())?;
+
+                            return Ok(());
+                        }
+                        Some(Action::Note) if notes_height.is_some() => {
                             let package = all_packages.get().unwrap()[real_idx(current)].to_owned();
                             let note = notes.get(&package).unwrap_or_default().to_owned();
                             note_editor = Some(NoteEditor::new(package, &note));
                             mode.store(Mode::Note, Ordering::SeqCst);
                             redraw.store(true, Ordering::SeqCst);
                         }
-                        'i' | '/' => {
-                            insert_pos = query.len() as u16;
-                            redraw.store(true, Ordering::SeqCst);
-                            mode.store(Mode::Insert, Ordering::SeqCst);
-                        }
-                        'q' => {
-                            disable_raw_mode()?;
-                            stream_exit!(terminal.backend_mut())?;
-
-                            return Ok(());
-                        }
-                        'c' if k.modifiers.contains(KeyModifiers::CONTROL) => {
-                            disable_raw_mode()?;
-                            stream_exit!(terminal.backend_mut())?;
-
-                            return Ok(());
-                        }
-                        'U' => {
+                        Some(Action::UpgradeAll) => {
                             disable_raw_mode()?;
                             stream_exit!(terminal.backend_mut())?;
                             terminal.show_cursor()?;
@@ -833,7 +848,7 @@ async fn main() -> Result<(), io::Error> {
 
                             return run_and_reopen(cmd, &command, &query, reopen);
                         }
-                        'x' => {
+                        Some(Action::Ignore) => {
                             let packages = all_packages.get().unwrap();
                             let mut targets: Vec<String> = if selected.is_empty() {
                                 vec![packages[real_idx(current)].to_owned()]
@@ -917,7 +932,7 @@ async fn main() -> Result<(), io::Error> {
                             };
                             redraw.store(true, Ordering::SeqCst);
                         }
-                        'R' => {
+                        Some(Action::Remove) => {
                             let mut has_any = false;
                             let mut cmd = std::process::Command::new(&command);
                             cmd.arg("-R");
@@ -960,48 +975,46 @@ async fn main() -> Result<(), io::Error> {
 
                             return run_and_reopen(cmd, &command, &query, reopen);
                         }
+                        Some(Action::Install) => {
+                            disable_raw_mode()?;
+                            stream_exit!(terminal.backend_mut())?;
+                            terminal.show_cursor()?;
+                            drop(terminal);
 
+                            if let Some(search_task) = search_task.take() {
+                                search_task.abort();
+                            }
+
+                            let mut cmd = std::process::Command::new(&command);
+                            cmd.arg("-S");
+
+                            let stdout = io::stdout().lock();
+                            let mut writer = BufWriter::new(stdout);
+                            let _ = writer.write_all(b"Installing ");
+
+                            if selected.is_empty() {
+                                let package = &all_packages.get().unwrap()[real_idx(current)];
+                                let _ = writer.write_all(package.as_bytes());
+                                cmd.arg(package);
+                            } else {
+                                for (idx, i) in selected.iter().enumerate() {
+                                    let package = &all_packages.get().unwrap()[*i];
+                                    let _ = writer.write_all(package.as_bytes());
+                                    if idx != selected.len() - 1 {
+                                        let _ = writer.write_all(b", ");
+                                    }
+
+                                    cmd.arg(package);
+                                }
+                            }
+
+                            let _ = writer.write_all(b".\n");
+                            let _ = writer.flush();
+
+                            return run_and_reopen(cmd, &command, &query, reopen);
+                        }
                         _ => redraw.store(true, Ordering::SeqCst),
                     },
-                    KeyCode::Enter => {
-                        disable_raw_mode()?;
-                        stream_exit!(terminal.backend_mut())?;
-                        terminal.show_cursor()?;
-                        drop(terminal);
-
-                        if let Some(search_task) = search_task.take() {
-                            search_task.abort();
-                        }
-
-                        let mut cmd = std::process::Command::new(&command);
-                        cmd.arg("-S");
-
-                        let stdout = io::stdout().lock();
-                        let mut writer = BufWriter::new(stdout);
-                        let _ = writer.write_all(b"Installing ");
-
-                        if selected.is_empty() {
-                            let package = &all_packages.get().unwrap()[real_idx(current)];
-                            let _ = writer.write_all(package.as_bytes());
-                            cmd.arg(package);
-                        } else {
-                            for (idx, i) in selected.iter().enumerate() {
-                                let package = &all_packages.get().unwrap()[*i];
-                                let _ = writer.write_all(package.as_bytes());
-                                if idx != selected.len() - 1 {
-                                    let _ = writer.write_all(b", ");
-                                }
-
-                                cmd.arg(package);
-                            }
-                        }
-
-                        let _ = writer.write_all(b".\n");
-                        let _ = writer.flush();
-
-                        return run_and_reopen(cmd, &command, &query, reopen);
-                    }
-                    _ => redraw.store(true, Ordering::SeqCst),
                 },
             },
             _ => continue,

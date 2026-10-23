@@ -22,7 +22,8 @@ Usage: parui [OPTION]... QUERY
 
 ### Keybinds
 
-parui adopts vim-like keybinds.
+parui adopts vim-like keybinds. Those of select mode can be changed in the
+[configuration file](#configuration).
 
 | Key                    | Mode   | Action                                        |
 |------------------------|--------|-----------------------------------------------|
@@ -87,6 +88,28 @@ color-not-installed = #5ca8ff
 color-note-label = #9a9a9a
 # Text of the row under the cursor, whose background is the color of its package.
 color-cursor-text = #1e1e1e
+
+# Keys of select mode, as comma-separated lists that replace the defaults below. An empty list
+# unbinds the action. Keys are characters (`R` is Shift-r), or enter, space, tab, backspace,
+# delete, insert, up, down, left, right, home, end, pageup, pagedown, f1 to f12, comma and plus,
+# optionally after ctrl+, alt+ or shift+. Escape and ctrl+c cannot be rebound.
+key-install = enter
+key-remove = R
+key-upgrade-all = U
+key-ignore = x
+key-note = n
+key-select = space
+key-clear-selection = c
+key-search = i, /
+key-quit = q
+key-down = j, down
+key-up = k, up
+key-page-down = l, right, pagedown
+key-page-up = h, left, pageup
+key-top = g, home
+key-bottom = G, end
+key-info-down = ctrl+j, ctrl+down
+key-info-up = ctrl+k, ctrl+up
 ```
 
 Colors are either fixed, as `#rrggbb`, or taken from the terminal theme, as one of its 16 colors
