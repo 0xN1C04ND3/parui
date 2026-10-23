@@ -294,7 +294,7 @@ async fn main() -> Result<(), io::Error> {
 
                 // TODO: Use render_widget_ref when it is ready.
                 let mut actions: Vec<Line> = vec![
-                    "Press ENTER to (re)install selected packages"
+                    "Press ENTER to install/upgrade selected packages"
                         .green()
                         .bold()
                         .into(),

@@ -28,7 +28,7 @@ Keybinds:
        i, /
            Enter insert mode
        <Return>
-           Install selected packages
+           Install/upgrade selected packages
        <C-j>, <C-Down>
            Move info one row down
        <C-k>, <C-Up>
