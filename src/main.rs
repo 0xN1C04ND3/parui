@@ -679,9 +679,7 @@ async fn main() -> Result<(), io::Error> {
 
                             println!("Upgrading system.");
 
-                            let _ = cmd.exec();
-
-                            return Ok(());
+                            return run_and_reopen(cmd, &command, &query);
                         }
                         'x' => {
                             let packages = all_packages.get().unwrap();
@@ -808,9 +806,7 @@ async fn main() -> Result<(), io::Error> {
                             let _ = writer.write_all(b".\n");
                             let _ = writer.flush();
 
-                            let _ = cmd.exec();
-
-                            return Ok(());
+                            return run_and_reopen(cmd, &command, &query);
                         }
 
                         _ => redraw.store(true, Ordering::SeqCst),
@@ -825,7 +821,7 @@ async fn main() -> Result<(), io::Error> {
                             search_task.abort();
                         }
 
-                        let mut cmd = std::process::Command::new(command);
+                        let mut cmd = std::process::Command::new(&command);
                         cmd.arg("-S");
 
                         let stdout = io::stdout().lock();
@@ -851,9 +847,7 @@ async fn main() -> Result<(), io::Error> {
                         let _ = writer.write_all(b".\n");
                         let _ = writer.flush();
 
-                        let _ = cmd.exec();
-
-                        return Ok(());
+                        return run_and_reopen(cmd, &command, &query);
                     }
                     _ => redraw.store(true, Ordering::SeqCst),
                 },
@@ -919,6 +913,32 @@ impl From<io::Result<bool>> for Update {
             Err(err) => Update::Error(err),
         }
     }
+}
+
+/// Runs `cmd`, such as an install through paru, in the plain terminal, then restarts parui with
+/// the same program and query so that it shows the new state of the system.
+fn run_and_reopen(mut cmd: std::process::Command, command: &str, query: &str) -> io::Result<()> {
+    // Let Ctrl-C reach only `cmd`, so that parui can still reopen after it is interrupted.
+    let _ = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt());
+
+    if let Err(err) = cmd.status() {
+        eprintln!("parui: {command}: {err}");
+    }
+
+    print!("\nPress Enter to return to parui, or q and Enter to quit: ");
+    io::stdout().flush()?;
+    let mut answer = String::new();
+    io::stdin().read_line(&mut answer)?;
+    if answer.trim() == "q" {
+        return Ok(());
+    }
+
+    let mut parui = std::process::Command::new(env::current_exe()?);
+    parui.arg(format!("-p={command}"));
+    if !query.is_empty() {
+        parui.arg(query);
+    }
+    Err(parui.exec())
 }
 
 /// Hands the terminal back to the shell while `f` runs, for prompts such as sudo's password.
