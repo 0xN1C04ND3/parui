@@ -55,6 +55,13 @@ Keybinds:
            Upgrade the whole system
        x
            Ignore/unignore selected packages in upgrades
+       n
+           Edit the note of the current package
+   Note:
+       <Escape>
+           Save the note and go back
+       <Return>
+           Insert a new line
        q
            Exit parui"#
     );

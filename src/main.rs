@@ -24,6 +24,7 @@ use interface::{
 use message::Message;
 use mode::Mode;
 use nohash_hasher::{IntMap, IntSet};
+use notes::{NoteEditor, Notes};
 use parking_lot::{Mutex, RwLock};
 use shown::Shown;
 use tui::{
@@ -42,6 +43,7 @@ mod macros;
 mod matcher;
 mod message;
 mod mode;
+mod notes;
 mod shown;
 mod widgets;
 
@@ -82,6 +84,9 @@ async fn main() -> Result<(), io::Error> {
     let mut ignored = Ignored::load();
     // Shown below the package list until the next key press.
     let mut notice: Option<String> = None;
+    let mut notes = Notes::load();
+    // The note being edited, in `Mode::Note`.
+    let mut note_editor: Option<NoteEditor> = None;
 
     let shown_len = || {
         shown
@@ -188,16 +193,25 @@ async fn main() -> Result<(), io::Error> {
             terminal.draw(|f| {
                 let search_color;
                 let shown_color;
+                let notes_color;
                 let search_mod;
                 match mode.load(Ordering::SeqCst) {
                     Mode::Insert => {
                         search_color = Color::White;
                         shown_color = Color::Gray;
+                        notes_color = Color::Gray;
                         search_mod = Modifier::BOLD;
                     }
                     Mode::Select => {
                         search_color = Color::Gray;
                         shown_color = Color::White;
+                        notes_color = Color::White;
+                        search_mod = Modifier::default();
+                    }
+                    Mode::Note => {
+                        search_color = Color::Gray;
+                        shown_color = Color::Gray;
+                        notes_color = Color::White;
                         search_mod = Modifier::default();
                     }
                 };
@@ -272,6 +286,7 @@ async fn main() -> Result<(), io::Error> {
                         installed,
                         upgradable,
                         &ignored,
+                        &notes,
                     );
                     f.render_widget(
                         Paragraph::new(formatted).alignment(Alignment::Left),
@@ -284,12 +299,7 @@ async fn main() -> Result<(), io::Error> {
                     );
                 }
 
-                let area = Rect {
-                    x: size.width / 2,
-                    y: 4,
-                    width: size.width / 2 - 1,
-                    height: size.height - 5,
-                };
+                let (area, notes_area) = right_panes(size);
                 let border = Block::default()
                     .borders(Borders::ALL)
                     .border_style(Style::default().fg(shown_color))
@@ -334,7 +344,7 @@ async fn main() -> Result<(), io::Error> {
                         x: size.width / 2 + 2,
                         y: 5,
                         width: size.width / 2 - 5,
-                        height: actions_height,
+                        height: actions_height.min(area.height.saturating_sub(2)),
                     },
                 );
 
@@ -348,9 +358,59 @@ async fn main() -> Result<(), io::Error> {
                         x: size.width / 2 + 2,
                         y: 6 + hint_lines,
                         width: size.width / 2 - 5,
-                        height: size.height.saturating_sub(8 + hint_lines),
+                        height: (area.y + area.height - 1).saturating_sub(6 + hint_lines),
                     },
                 );
+
+                let current_package = all_packages
+                    .get()
+                    .filter(|_| shown_len() != 0)
+                    .map(|packages| &packages[real_idx(current)]);
+                let notes_package = match &note_editor {
+                    Some(editor) => Some(editor.package.as_str()),
+                    None => current_package,
+                };
+                let mut notes_block = Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(notes_color))
+                    .border_type(BorderType::Rounded)
+                    .title(match notes_package {
+                        Some(package) => format!(" Notes: {package} ").bold(),
+                        None => " Notes ".bold(),
+                    });
+                if notes_package.is_some() {
+                    notes_block = notes_block.title_bottom(if note_editor.is_some() {
+                        " Esc: save "
+                    } else {
+                        " n: edit "
+                    });
+                }
+                f.render_widget(Clear, notes_area);
+                f.render_widget(notes_block, notes_area);
+
+                let text_area = notes_text_area(notes_area);
+                let width = text_area.width as usize;
+                let (rows, scroll): (Vec<Line>, _) = match &note_editor {
+                    Some(editor) => (
+                        notes::wrap(editor.text(), width)
+                            .into_iter()
+                            .map(Line::from)
+                            .collect(),
+                        note_scroll(editor, text_area),
+                    ),
+                    None => match notes_package.and_then(|package| notes.get(package)) {
+                        Some(note) => (
+                            notes::wrap(note, width)
+                                .into_iter()
+                                .map(Line::from)
+                                .collect(),
+                            0,
+                        ),
+                        None if notes_package.is_some() => (vec!["No note yet".gray().into()], 0),
+                        None => (Vec::new(), 0),
+                    },
+                };
+                f.render_widget(Paragraph::new(rows).scroll((scroll, 0)), text_area);
             })?;
 
             match mode.load(Ordering::SeqCst) {
@@ -364,6 +424,16 @@ async fn main() -> Result<(), io::Error> {
                 Mode::Select => {
                     terminal.set_cursor_position((2, line as u16 + 4))?;
                     terminal.hide_cursor()?;
+                }
+                Mode::Note => {
+                    if let Some(editor) = &note_editor {
+                        let text_area = notes_text_area(right_panes(size).1);
+                        let (row, col) = editor.cursor_position(text_area.width as usize);
+                        let row = row as u16 - note_scroll(editor, text_area);
+                        terminal
+                            .set_cursor_position((text_area.x + col as u16, text_area.y + row))?;
+                        terminal.show_cursor()?;
+                    }
                 }
             }
         }
@@ -380,6 +450,14 @@ async fn main() -> Result<(), io::Error> {
 
         match e {
             Event::Resize(..) => redraw.store(true, Ordering::SeqCst),
+            Event::Paste(s) if mode.load(Ordering::SeqCst) == Mode::Note => {
+                if let Some(editor) = &mut note_editor {
+                    editor.insert_str(&s);
+                }
+                redraw.store(true, Ordering::SeqCst);
+            }
+            // Clicking elsewhere would switch modes and leave the note half edited.
+            Event::Mouse(_) if mode.load(Ordering::SeqCst) == Mode::Note => (),
             Event::Paste(s) if mode.load(Ordering::SeqCst) == Mode::Insert => {
                 let s = s.replace('\n', "");
                 let s = s.trim();
@@ -556,6 +634,48 @@ async fn main() -> Result<(), io::Error> {
                     }
                     _ => redraw.store(true, Ordering::SeqCst),
                 },
+                Mode::Note => {
+                    let Some(editor) = &mut note_editor else {
+                        mode.store(Mode::Select, Ordering::SeqCst);
+                        continue;
+                    };
+                    let quit =
+                        k.code == KeyCode::Char('c') && k.modifiers.contains(KeyModifiers::CONTROL);
+
+                    match k.code {
+                        _ if quit => (),
+                        KeyCode::Esc => (),
+                        KeyCode::Enter => editor.insert('\n'),
+                        KeyCode::Char(c) => editor.insert(c),
+                        KeyCode::Backspace => editor.backspace(),
+                        KeyCode::Delete => editor.delete(),
+                        KeyCode::Left => editor.left(),
+                        KeyCode::Right => editor.right(),
+                        KeyCode::Up => editor.up(),
+                        KeyCode::Down => editor.down(),
+                        KeyCode::Home => editor.home(),
+                        KeyCode::End => editor.end(),
+                        _ => continue,
+                    }
+
+                    if quit || k.code == KeyCode::Esc {
+                        if let Err(err) = notes.set(&editor.package, editor.text()) {
+                            notice = Some(format!("Could not save the note: {err}"));
+                        }
+                        note_editor = None;
+                        mode.store(Mode::Select, Ordering::SeqCst);
+
+                        if quit {
+                            disable_raw_mode()?;
+                            stream_exit!(terminal.backend_mut())?;
+                            if let Some(notice) = notice {
+                                eprintln!("parui: {notice}");
+                            }
+                            return Ok(());
+                        }
+                    }
+                    redraw.store(true, Ordering::SeqCst);
+                }
                 Mode::Select => match k.code {
                     KeyCode::Up | KeyCode::Char('k') => {
                         if k.modifiers == KeyModifiers::CONTROL {
@@ -643,6 +763,13 @@ async fn main() -> Result<(), io::Error> {
                             } else {
                                 selected.insert(real_current);
                             }
+                            redraw.store(true, Ordering::SeqCst);
+                        }
+                        'n' => {
+                            let package = all_packages.get().unwrap()[real_idx(current)].to_owned();
+                            let note = notes.get(&package).unwrap_or_default().to_owned();
+                            note_editor = Some(NoteEditor::new(package, &note));
+                            mode.store(Mode::Note, Ordering::SeqCst);
                             redraw.store(true, Ordering::SeqCst);
                         }
                         'i' | '/' => {
@@ -891,10 +1018,45 @@ fn within_list(size: Size, row: u16, col: u16) -> bool {
 }
 
 fn within_info(size: Size, row: u16, col: u16) -> bool {
+    let (info, _) = right_panes(size);
     col > size.width / 2
         && col < size.width.saturating_sub(3)
-        && row >= 5
-        && row < size.height.saturating_sub(2)
+        && row > info.y
+        && row < info.y + info.height - 1
+}
+
+/// The info pane and, below it in the bottom right corner, the notes pane.
+fn right_panes(size: Size) -> (Rect, Rect) {
+    let height = size.height - 5;
+    let notes_height = (height / 3).max(3);
+    let info = Rect {
+        x: size.width / 2,
+        y: 4,
+        width: size.width / 2 - 1,
+        height: height - notes_height,
+    };
+    let notes = Rect {
+        y: info.y + info.height,
+        height: notes_height,
+        ..info
+    };
+    (info, notes)
+}
+
+/// Where the text of the notes pane goes, matching the padding of the info pane.
+fn notes_text_area(notes: Rect) -> Rect {
+    Rect {
+        x: notes.x + 2,
+        y: notes.y + 1,
+        width: notes.width.saturating_sub(4),
+        height: notes.height.saturating_sub(2),
+    }
+}
+
+/// How many rows to scroll the edited note by to keep the cursor visible.
+fn note_scroll(editor: &NoteEditor, text_area: Rect) -> u16 {
+    let (row, _) = editor.cursor_position(text_area.width as usize);
+    (row as u16).saturating_sub(text_area.height.saturating_sub(1))
 }
 
 /// Outcome of updating the ignored packages.

@@ -5,4 +5,5 @@ use bytemuck::NoUninit;
 pub enum Mode {
     Insert,
     Select,
+    Note,
 }

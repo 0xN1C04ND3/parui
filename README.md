@@ -45,6 +45,8 @@ parui adopts vim-like keybinds.
 | \<S-R\>                | Select | Remove selected packages                      |
 | \<S-U\>                | Select | Upgrade the whole system                      |
 | x                      | Select | Ignore/unignore selected packages in upgrades |
+| n                      | Select | Edit the note of the current package          |
+| \<Escape\>             | Note   | Save the note and go back                     |
 | q                      | Select | Exits parui                                   |
 
 ### Ignoring packages
@@ -53,6 +55,13 @@ parui adopts vim-like keybinds.
 entries, so that pacman, paru and `<S-U>` skip them when upgrading. Ignored packages are shown
 crossed out. The first time, parui offers to include that file from the `[options]` section of
 `/etc/pacman.conf`. Both files are written through sudo.
+
+### Notes
+
+`n` opens the notes pane in the bottom right corner to write a note about the current package,
+such as why it is held back. `<Escape>` saves it, and an empty note is deleted. Packages with a
+note are marked with ✎ in the list. Notes are kept in `$XDG_DATA_HOME/parui/notes`, by default
+`~/.local/share/parui/notes`.
 
 ### Images
 ![Start Screen](https://user-images.githubusercontent.com/24369412/218350990-96a0f294-9612-4103-b43c-98b7ecfa2428.png)

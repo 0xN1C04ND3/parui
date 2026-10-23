@@ -19,7 +19,7 @@ use tui::{
     text::{Line, Span},
 };
 
-use crate::{ignore::Ignored, matcher::Matcher, shown::Shown};
+use crate::{ignore::Ignored, matcher::Matcher, notes::Notes, shown::Shown};
 
 pub async fn list(show_aur: bool) -> FixedCompactStrings {
     let mut cmd = Command::new("pacman");
@@ -238,6 +238,7 @@ pub fn format_results<'line>(
     installed: &IntSet<usize>,
     upgradable: &IntMap<usize, Upgrade>,
     ignored: &Ignored,
+    notes: &Notes,
 ) -> Vec<Line<'line>> {
     use crate::{cows, style};
 
@@ -311,6 +312,11 @@ pub fn format_results<'line>(
         "               "
     );
 
+    const HAS_NOTE: Span = Span {
+        content: Cow::Borrowed(" ✎"),
+        style: style!(Color::Gray),
+    };
+
     const SELECTED: Span = Span {
         content: Cow::Borrowed("!"),
         style: style! { fg: Color::Yellow, mod: Modifier::BOLD, },
@@ -337,11 +343,13 @@ pub fn format_results<'line>(
                     package_style(real_index, &packages[package_idx], current == index - 1),
                 );
 
-                let spans = if selected.contains(&real_index) {
-                    vec![index_span, padding_span, line_span, SELECTED]
-                } else {
-                    vec![index_span, padding_span, line_span]
-                };
+                let mut spans = vec![index_span, padding_span, line_span];
+                if notes.contains(&packages[package_idx]) {
+                    spans.push(HAS_NOTE);
+                }
+                if selected.contains(&real_index) {
+                    spans.push(SELECTED);
+                }
                 Line::from(spans)
             })
             .collect(),
@@ -358,11 +366,13 @@ pub fn format_results<'line>(
                 };
                 let line_span = Span::styled(line, package_style(i, line, current == i));
 
-                let spans = if selected.contains(&i) {
-                    vec![index_span, padding_span, line_span, SELECTED]
-                } else {
-                    vec![index_span, padding_span, line_span]
-                };
+                let mut spans = vec![index_span, padding_span, line_span];
+                if notes.contains(line) {
+                    spans.push(HAS_NOTE);
+                }
+                if selected.contains(&i) {
+                    spans.push(SELECTED);
+                }
                 Line::from(spans)
             })
             .collect(),
