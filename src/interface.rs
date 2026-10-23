@@ -123,8 +123,9 @@ pub struct Grouped {
     pub upgradable: IntMap<usize, Upgrade>,
 }
 
-/// Reorders `packages` into upgradable, then installed, then not installed packages, keeping the
-/// original order within each group, and returns the indices of each group in the new order.
+/// Reorders `packages` into upgradable, then installed, then not installed packages, and returns
+/// the indices of each group in the new order. The installed groups are sorted by name, while
+/// the not installed packages keep their original order.
 ///
 /// `installed` contains the upgradable packages too.
 pub fn group_packages(
@@ -157,7 +158,20 @@ pub fn group_packages(
     };
 
     for group in [Group::Upgradable, Group::Installed, Group::NotInstalled] {
-        for (package, _) in packages.iter().zip(&groups).filter(|(_, g)| **g == group) {
+        let mut members: Vec<&str> = packages
+            .iter()
+            .zip(&groups)
+            .filter(|(_, g)| **g == group)
+            .map(|(package, _)| package)
+            .collect();
+        // The listing goes through each repository alphabetically, then the AUR. Sort the
+        // installed groups into one alphabetical run, but keep the repository order of the rest
+        // so that official packages stay ahead of the AUR.
+        if group != Group::NotInstalled {
+            members.sort();
+        }
+
+        for package in members {
             let idx = out.packages.len();
             match group {
                 Group::Upgradable => {
@@ -499,7 +513,8 @@ mod tests {
     #[test]
     fn groups_upgradable_then_installed_then_rest() {
         let mut packages = FixedCompactStrings::with_capacity(64, 8);
-        for p in ["a", "up1", "b", "inst1", "up2", "c", "inst2", "up1"] {
+        // Like the listing, several alphabetical runs: two repositories, then the AUR.
+        for p in ["c", "inst2", "up2", "a", "inst1", "up1", "b", "up1"] {
             packages.push(p);
         }
         let installed: HashSet<String> = ["up1", "up2", "inst1", "inst2"]
@@ -513,13 +528,15 @@ mod tests {
         let order: Vec<&str> = grouped.packages.iter().collect();
         assert_eq!(
             order,
-            ["up1", "up2", "up1", "inst1", "inst2", "a", "b", "c"]
+            // Installed groups sorted, the rest in listing order.
+            ["up1", "up1", "up2", "inst1", "inst2", "c", "a", "b"]
         );
         assert_eq!(
             grouped.upgradable.keys().copied().collect::<IntSet<_>>(),
             [0, 1, 2].into_iter().collect()
         );
-        assert_eq!(grouped.upgradable[&1].new, "4");
+        assert_eq!(grouped.upgradable[&0].new, "2");
+        assert_eq!(grouped.upgradable[&2].new, "4");
         assert_eq!(grouped.installed, [0, 1, 2, 3, 4].into_iter().collect());
     }
 }
