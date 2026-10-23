@@ -32,7 +32,7 @@ use tui::{
     backend::CrosstermBackend,
     layout::{Alignment, Rect, Size},
     style::{Color, Modifier, Style, Stylize},
-    text::Line,
+    text::{Line, Span},
     widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap},
 };
 
@@ -313,45 +313,51 @@ async fn main() -> Result<(), io::Error> {
                 };
 
                 // TODO: Use render_widget_ref when it is ready.
-                let mut actions: Vec<Line> = vec![
-                    "Press ENTER to install/upgrade selected packages"
-                        .green()
-                        .bold()
-                        .into(),
-                    "Press Shift-R to uninstall selected packages"
-                        .red()
-                        .bold()
-                        .into(),
-                    "Press Shift-U to upgrade the whole system"
-                        .yellow()
-                        .bold()
-                        .into(),
-                    "Press x to ignore/unignore selected packages in upgrades"
-                        .magenta()
-                        .bold()
-                        .into(),
-                ];
-                let hint_lines = actions.len() as u16;
+                let hint = |key: &'static str, color: Color, action: &'static str| {
+                    [
+                        Span::styled(key, Style::new().fg(color).add_modifier(Modifier::BOLD)),
+                        Span::raw(action),
+                    ]
+                };
+                let separator = || Span::styled(" · ", Style::new().fg(Color::DarkGray));
+                let mut hints = Vec::new();
+                hints.extend(hint("Enter", Color::Green, " install/upgrade"));
+                hints.push(separator());
+                hints.extend(hint("R", Color::Red, " remove"));
+                hints.push(separator());
+                hints.extend(hint("U", Color::Yellow, " upgrade all"));
+                hints.push(separator());
+                hints.extend(hint("x", Color::Magenta, " ignore"));
+                let hints = Paragraph::new(Line::from(hints)).wrap(Wrap { trim: true });
+
+                let text_width = size.width / 2 - 5;
+                let hint_lines = u16::try_from(hints.line_count(text_width)).unwrap_or(u16::MAX);
+                let mut actions_height = hint_lines;
                 if no_info {
-                    actions.push(Line::default());
-                    actions.push("Finding info...".gray().into());
+                    actions_height += 2;
                 }
-                let actions_height = actions.len() as u16;
-                let actions = Paragraph::new(actions).alignment(Alignment::Left);
-                f.render_widget(
-                    actions,
-                    Rect {
-                        x: size.width / 2 + 2,
-                        y: 5,
-                        width: size.width / 2 - 5,
-                        height: actions_height.min(area.height.saturating_sub(2)),
-                    },
-                );
+                let actions_area = Rect {
+                    x: size.width / 2 + 2,
+                    y: 5,
+                    width: text_width,
+                    height: actions_height.min(area.height.saturating_sub(2)),
+                };
+                f.render_widget(hints, actions_area);
+                if no_info && actions_area.height > hint_lines + 1 {
+                    f.render_widget(
+                        Paragraph::new("Finding info...".gray()),
+                        Rect {
+                            y: actions_area.y + hint_lines + 1,
+                            height: 1,
+                            ..actions_area
+                        },
+                    );
+                }
 
                 let info_area = Rect {
                     x: size.width / 2 + 2,
                     y: 6 + hint_lines,
-                    width: size.width / 2 - 5,
+                    width: text_width,
                     height: (area.y + area.height - 1).saturating_sub(6 + hint_lines),
                 };
                 // TODO: Use render_widget_ref when it is ready.
