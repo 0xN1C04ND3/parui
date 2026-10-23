@@ -19,7 +19,7 @@ use tui::{
     text::{Line, Span},
 };
 
-use crate::{ignore::Ignored, matcher::Matcher, notes::Notes, shown::Shown};
+use crate::{config::Colors, ignore::Ignored, matcher::Matcher, notes::Notes, shown::Shown};
 
 pub async fn list(show_aur: bool) -> FixedCompactStrings {
     let mut cmd = Command::new("pacman");
@@ -219,14 +219,6 @@ pub fn search(query: &str, packages: &FixedCompactStrings, shown: Arc<RwLock<Sho
     }
 }
 
-// Explicit RGB colors, because terminal themes remap the ANSI palette freely (Monokai Pro, for
-// one, renders ANSI blue as orange), which would make the package groups indistinguishable.
-const UPGRADABLE_COLOR: Color = Color::Rgb(0xff, 0x9e, 0x40);
-const INSTALLED_COLOR: Color = Color::Rgb(0x8c, 0xd8, 0x5a);
-const UNINSTALLED_COLOR: Color = Color::Rgb(0x5c, 0xa8, 0xff);
-const CURRENT_FG_COLOR: Color = Color::Rgb(0x1e, 0x1e, 0x1e);
-const NOTE_LABEL_COLOR: Color = Color::Rgb(0x9a, 0x9a, 0x9a);
-
 #[allow(clippy::too_many_arguments)]
 pub fn format_results<'line>(
     packages: &'line FixedCompactStrings,
@@ -240,51 +232,27 @@ pub fn format_results<'line>(
     upgradable: &IntMap<usize, Upgrade>,
     ignored: &Ignored,
     notes: &Notes,
+    colors: &Colors,
 ) -> Vec<Line<'line>> {
     use crate::{cows, style};
 
     const INDEX_STYLE: Style = style!(Color::Gray);
-    const UPGRADABLE_STYLE: Style = style! {
-        fg: UPGRADABLE_COLOR,
-        mod: Modifier::BOLD,
-    };
-    const UPGRADABLE_CURRENT_STYLE: Style = style! {
-        fg: CURRENT_FG_COLOR,
-        bg: UPGRADABLE_COLOR,
-        mod: Modifier::BOLD,
-    };
-    const INSTALLED_STYLE: Style = style! {
-        fg: INSTALLED_COLOR,
-        mod: Modifier::BOLD,
-    };
-    const INSTALLED_CURRENT_STYLE: Style = style! {
-        fg: CURRENT_FG_COLOR,
-        bg: INSTALLED_COLOR,
-        mod: Modifier::BOLD,
-    };
-    const UNINSTALLED_STYLE: Style = style! {
-        fg: UNINSTALLED_COLOR,
-        mod: Modifier::BOLD,
-    };
-    const UNINSTALLED_CURRENT_STYLE: Style = style! {
-        fg: CURRENT_FG_COLOR,
-        bg: UNINSTALLED_COLOR,
-        mod: Modifier::BOLD,
-    };
     const DEFAULT_STYLE: Style = style!();
 
     let package_style = |idx: usize, name: &str, is_current: bool| {
-        let style = match (
-            upgradable.contains_key(&idx),
-            installed.contains(&idx),
-            is_current,
-        ) {
-            (true, _, true) => UPGRADABLE_CURRENT_STYLE,
-            (true, _, false) => UPGRADABLE_STYLE,
-            (false, true, true) => INSTALLED_CURRENT_STYLE,
-            (false, true, false) => INSTALLED_STYLE,
-            (false, false, true) => UNINSTALLED_CURRENT_STYLE,
-            (false, false, false) => UNINSTALLED_STYLE,
+        let color = if upgradable.contains_key(&idx) {
+            colors.upgradable
+        } else if installed.contains(&idx) {
+            colors.installed
+        } else {
+            colors.not_installed
+        };
+
+        let style = Style::new().add_modifier(Modifier::BOLD);
+        let style = if is_current {
+            style.fg(colors.cursor_text).bg(color)
+        } else {
+            style.fg(color)
         };
 
         if ignored.matches(name) {
@@ -313,10 +281,12 @@ pub fn format_results<'line>(
         "               "
     );
 
-    const HAS_NOTE: Span = Span {
-        content: Cow::Borrowed(" Note"),
-        style: style! { fg: NOTE_LABEL_COLOR, mod: Modifier::ITALIC, },
-    };
+    let has_note = Span::styled(
+        " Note",
+        Style::new()
+            .fg(colors.note_label)
+            .add_modifier(Modifier::ITALIC),
+    );
 
     const SELECTED: Span = Span {
         content: Cow::Borrowed("!"),
@@ -346,7 +316,7 @@ pub fn format_results<'line>(
 
                 let mut spans = vec![index_span, padding_span, line_span];
                 if notes.contains(&packages[package_idx]) {
-                    spans.push(HAS_NOTE);
+                    spans.push(has_note.clone());
                 }
                 if selected.contains(&real_index) {
                     spans.push(SELECTED);
@@ -369,7 +339,7 @@ pub fn format_results<'line>(
 
                 let mut spans = vec![index_span, padding_span, line_span];
                 if notes.contains(line) {
-                    spans.push(HAS_NOTE);
+                    spans.push(has_note.clone());
                 }
                 if selected.contains(&i) {
                     spans.push(SELECTED);
@@ -385,6 +355,7 @@ pub async fn get_info<'line>(
     index: usize,
     installed_cache: &IntSet<usize>,
     upgradable: &IntMap<usize, Upgrade>,
+    colors: Colors,
     command: &str,
 ) -> Vec<Line<'line>> {
     if index >= all_packages.len() {
@@ -422,7 +393,7 @@ pub async fn get_info<'line>(
             Span::styled(
                 format!(" {} -> {}", upgrade.old, upgrade.new),
                 Style::new()
-                    .fg(UPGRADABLE_COLOR)
+                    .fg(colors.upgradable)
                     .add_modifier(Modifier::BOLD),
             ),
         ]));

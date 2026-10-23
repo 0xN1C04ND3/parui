@@ -2,11 +2,15 @@ use std::{env::Args, process::exit};
 
 use self::help::print_help;
 
+mod file;
 mod help;
+
+pub use file::{Colors, NotesHeight, Reopen, Settings};
 
 pub struct Config {
     pub query: Option<String>,
     pub command: String,
+    pub settings: Settings,
 }
 
 impl Config {
@@ -30,7 +34,18 @@ impl Config {
             }
         }
 
-        let command = command.unwrap_or_else(|| String::from("paru"));
+        let mut settings = match file::load() {
+            Ok(settings) => settings,
+            Err(err) => {
+                eprintln!("parui: {err}");
+                exit(1);
+            }
+        };
+
+        // `-p=` takes precedence over the configuration file.
+        let command = command
+            .or_else(|| settings.program.take())
+            .unwrap_or_else(|| String::from("paru"));
 
         if let Err(err) = std::process::Command::new(&command).arg("--help").output() {
             match err.kind() {
@@ -44,6 +59,10 @@ impl Config {
             exit(1);
         }
 
-        Self { query, command }
+        Self {
+            query,
+            command,
+            settings,
+        }
     }
 }

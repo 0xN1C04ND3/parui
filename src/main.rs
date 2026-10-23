@@ -11,7 +11,7 @@ use std::{
 
 use atomic::Atomic;
 use compact_strings::FixedCompactStrings;
-use config::Config;
+use config::{Config, NotesHeight, Reopen};
 use crossterm::{
     event::{self, Event, KeyCode, KeyModifiers, MouseButton, MouseEventKind},
     terminal::{disable_raw_mode, enable_raw_mode},
@@ -58,6 +58,11 @@ async fn main() -> Result<(), io::Error> {
 
     let args = Config::new(env::args());
     let command = args.command;
+    let settings = args.settings;
+    let colors = settings.colors;
+    let reopen = settings.reopen;
+    // `None` when notes are disabled.
+    let notes_height = settings.notes.then_some(settings.notes_height);
 
     enable_raw_mode()?;
     let mut stdout = io::stdout();
@@ -84,7 +89,11 @@ async fn main() -> Result<(), io::Error> {
     let mut ignored = Ignored::load();
     // Shown below the package list until the next key press.
     let mut notice: Option<String> = None;
-    let mut notes = Notes::load();
+    let mut notes = if notes_height.is_some() {
+        Notes::load()
+    } else {
+        Notes::none()
+    };
     // The note being edited, in `Mode::Note`.
     let mut note_editor: Option<NoteEditor> = None;
 
@@ -182,6 +191,7 @@ async fn main() -> Result<(), io::Error> {
                         real_idx,
                         installed.get().unwrap(),
                         upgradable.get().unwrap(),
+                        colors,
                         &command,
                     )
                     .await;
@@ -287,6 +297,7 @@ async fn main() -> Result<(), io::Error> {
                         upgradable,
                         &ignored,
                         &notes,
+                        &colors,
                     );
                     f.render_widget(
                         Paragraph::new(formatted).alignment(Alignment::Left),
@@ -299,7 +310,7 @@ async fn main() -> Result<(), io::Error> {
                     );
                 }
 
-                let (area, notes_area) = right_panes(size);
+                let (area, notes_area) = right_panes(size, notes_height);
                 let border = Block::default()
                     .borders(Borders::ALL)
                     .border_style(Style::default().fg(shown_color))
@@ -370,55 +381,59 @@ async fn main() -> Result<(), io::Error> {
                 info_scroll = info_scroll.min(max_scroll);
                 f.render_widget(info.scroll((info_scroll, 0)), info_area);
 
-                let current_package = all_packages
-                    .get()
-                    .filter(|_| shown_len() != 0)
-                    .map(|packages| &packages[real_idx(current)]);
-                let notes_package = match &note_editor {
-                    Some(editor) => Some(editor.package.as_str()),
-                    None => current_package,
-                };
-                let mut notes_block = Block::default()
-                    .borders(Borders::ALL)
-                    .border_style(Style::default().fg(notes_color))
-                    .border_type(BorderType::Rounded)
-                    .title(match notes_package {
-                        Some(package) => format!(" Notes: {package} ").bold(),
-                        None => " Notes ".bold(),
-                    });
-                if notes_package.is_some() {
-                    notes_block = notes_block.title_bottom(if note_editor.is_some() {
-                        " Esc: save "
-                    } else {
-                        " n: edit "
-                    });
-                }
-                f.render_widget(Clear, notes_area);
-                f.render_widget(notes_block, notes_area);
+                if notes_height.is_some() {
+                    let current_package = all_packages
+                        .get()
+                        .filter(|_| shown_len() != 0)
+                        .map(|packages| &packages[real_idx(current)]);
+                    let notes_package = match &note_editor {
+                        Some(editor) => Some(editor.package.as_str()),
+                        None => current_package,
+                    };
+                    let mut notes_block = Block::default()
+                        .borders(Borders::ALL)
+                        .border_style(Style::default().fg(notes_color))
+                        .border_type(BorderType::Rounded)
+                        .title(match notes_package {
+                            Some(package) => format!(" Notes: {package} ").bold(),
+                            None => " Notes ".bold(),
+                        });
+                    if notes_package.is_some() {
+                        notes_block = notes_block.title_bottom(if note_editor.is_some() {
+                            " Esc: save "
+                        } else {
+                            " n: edit "
+                        });
+                    }
+                    f.render_widget(Clear, notes_area);
+                    f.render_widget(notes_block, notes_area);
 
-                let text_area = notes_text_area(notes_area);
-                let width = text_area.width as usize;
-                let (rows, scroll): (Vec<Line>, _) = match &note_editor {
-                    Some(editor) => (
-                        notes::wrap(editor.text(), width)
-                            .into_iter()
-                            .map(Line::from)
-                            .collect(),
-                        note_scroll(editor, text_area),
-                    ),
-                    None => match notes_package.and_then(|package| notes.get(package)) {
-                        Some(note) => (
-                            notes::wrap(note, width)
+                    let text_area = notes_text_area(notes_area);
+                    let width = text_area.width as usize;
+                    let (rows, scroll): (Vec<Line>, _) = match &note_editor {
+                        Some(editor) => (
+                            notes::wrap(editor.text(), width)
                                 .into_iter()
                                 .map(Line::from)
                                 .collect(),
-                            0,
+                            note_scroll(editor, text_area),
                         ),
-                        None if notes_package.is_some() => (vec!["No note yet".gray().into()], 0),
-                        None => (Vec::new(), 0),
-                    },
-                };
-                f.render_widget(Paragraph::new(rows).scroll((scroll, 0)), text_area);
+                        None => match notes_package.and_then(|package| notes.get(package)) {
+                            Some(note) => (
+                                notes::wrap(note, width)
+                                    .into_iter()
+                                    .map(Line::from)
+                                    .collect(),
+                                0,
+                            ),
+                            None if notes_package.is_some() => {
+                                (vec!["No note yet".gray().into()], 0)
+                            }
+                            None => (Vec::new(), 0),
+                        },
+                    };
+                    f.render_widget(Paragraph::new(rows).scroll((scroll, 0)), text_area);
+                }
             })?;
 
             match mode.load(Ordering::SeqCst) {
@@ -435,7 +450,7 @@ async fn main() -> Result<(), io::Error> {
                 }
                 Mode::Note => {
                     if let Some(editor) = &note_editor {
-                        let text_area = notes_text_area(right_panes(size).1);
+                        let text_area = notes_text_area(right_panes(size, notes_height).1);
                         let (row, col) = editor.cursor_position(text_area.width as usize);
                         let row = row as u16 - note_scroll(editor, text_area);
                         terminal
@@ -501,7 +516,9 @@ async fn main() -> Result<(), io::Error> {
                         info_scroll = 0;
                         info.lock().clear();
                         redraw.store(true, Ordering::SeqCst);
-                    } else if within_info(size, m.row, m.column) && !info.lock().is_empty() {
+                    } else if within_info(size, notes_height, m.row, m.column)
+                        && !info.lock().is_empty()
+                    {
                         match m.kind {
                             Kind::ScrollUp => {
                                 info_scroll = info_scroll.saturating_sub(1);
@@ -773,7 +790,7 @@ async fn main() -> Result<(), io::Error> {
                             }
                             redraw.store(true, Ordering::SeqCst);
                         }
-                        'n' => {
+                        'n' if notes_height.is_some() => {
                             let package = all_packages.get().unwrap()[real_idx(current)].to_owned();
                             let note = notes.get(&package).unwrap_or_default().to_owned();
                             note_editor = Some(NoteEditor::new(package, &note));
@@ -814,7 +831,7 @@ async fn main() -> Result<(), io::Error> {
 
                             println!("Upgrading system.");
 
-                            return run_and_reopen(cmd, &command, &query);
+                            return run_and_reopen(cmd, &command, &query, reopen);
                         }
                         'x' => {
                             let packages = all_packages.get().unwrap();
@@ -941,7 +958,7 @@ async fn main() -> Result<(), io::Error> {
                             let _ = writer.write_all(b".\n");
                             let _ = writer.flush();
 
-                            return run_and_reopen(cmd, &command, &query);
+                            return run_and_reopen(cmd, &command, &query, reopen);
                         }
 
                         _ => redraw.store(true, Ordering::SeqCst),
@@ -982,7 +999,7 @@ async fn main() -> Result<(), io::Error> {
                         let _ = writer.write_all(b".\n");
                         let _ = writer.flush();
 
-                        return run_and_reopen(cmd, &command, &query);
+                        return run_and_reopen(cmd, &command, &query, reopen);
                     }
                     _ => redraw.store(true, Ordering::SeqCst),
                 },
@@ -1025,18 +1042,19 @@ fn within_list(size: Size, row: u16, col: u16) -> bool {
         && row < size.height.saturating_sub(1)
 }
 
-fn within_info(size: Size, row: u16, col: u16) -> bool {
-    let (info, _) = right_panes(size);
+fn within_info(size: Size, notes_height: Option<NotesHeight>, row: u16, col: u16) -> bool {
+    let (info, _) = right_panes(size, notes_height);
     col > size.width / 2
         && col < size.width.saturating_sub(3)
         && row > info.y
         && row < info.y + info.height - 1
 }
 
-/// The info pane and, below it in the bottom right corner, the notes pane.
-fn right_panes(size: Size) -> (Rect, Rect) {
+/// The info pane and, below it in the bottom right corner, the notes pane, which is empty when
+/// notes are disabled.
+fn right_panes(size: Size, notes_height: Option<NotesHeight>) -> (Rect, Rect) {
     let height = size.height - 5;
-    let notes_height = (height / 3).max(3);
+    let notes_height = notes_height.map_or(0, |notes_height| notes_height.rows(height));
     let info = Rect {
         x: size.width / 2,
         y: 4,
@@ -1086,8 +1104,17 @@ impl From<io::Result<bool>> for Update {
 }
 
 /// Runs `cmd`, such as an install through paru, in the plain terminal, then restarts parui with
-/// the same program and query so that it shows the new state of the system.
-fn run_and_reopen(mut cmd: std::process::Command, command: &str, query: &str) -> io::Result<()> {
+/// the same program and query so that it shows the new state of the system, as `reopen` says.
+fn run_and_reopen(
+    mut cmd: std::process::Command,
+    command: &str,
+    query: &str,
+    reopen: Reopen,
+) -> io::Result<()> {
+    if reopen == Reopen::Never {
+        return Err(cmd.exec());
+    }
+
     // Let Ctrl-C reach only `cmd`, so that parui can still reopen after it is interrupted.
     let _ = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt());
 
@@ -1095,12 +1122,14 @@ fn run_and_reopen(mut cmd: std::process::Command, command: &str, query: &str) ->
         eprintln!("parui: {command}: {err}");
     }
 
-    print!("\nPress Enter to return to parui, or q and Enter to quit: ");
-    io::stdout().flush()?;
-    let mut answer = String::new();
-    io::stdin().read_line(&mut answer)?;
-    if answer.trim() == "q" {
-        return Ok(());
+    if reopen == Reopen::Ask {
+        print!("\nPress Enter to return to parui, or q and Enter to quit: ");
+        io::stdout().flush()?;
+        let mut answer = String::new();
+        io::stdin().read_line(&mut answer)?;
+        if answer.trim() == "q" {
+            return Ok(());
+        }
     }
 
     let mut parui = std::process::Command::new(env::current_exe()?);

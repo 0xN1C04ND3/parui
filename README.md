@@ -63,6 +63,38 @@ such as why it is held back. `<Escape>` saves it, and an empty note is deleted. 
 note are labelled "Note" in the list. Notes are kept in `$XDG_DATA_HOME/parui/notes`, by default
 `~/.local/share/parui/notes`.
 
+### Configuration
+
+parui reads `$XDG_CONFIG_HOME/parui/config`, by default `~/.config/parui/config`. Each line is
+`key = value`, lines starting with `#` are comments, and every setting is optional:
+
+```
+# Program used to search and install packages. -p= takes precedence.
+program = paru
+
+# After installing, removing or upgrading: wait for Enter and reopen parui (ask), reopen right
+# away (always), or stay in the terminal like upstream parui (never).
+reopen = ask
+
+# Notes pane in the bottom right corner, and its height in rows or as a percentage.
+notes = true
+notes-height = 33%
+
+# Colors of the package list.
+color-upgradable = #ff9e40
+color-installed = #8cd85a
+color-not-installed = #5ca8ff
+color-note-label = #9a9a9a
+# Text of the row under the cursor, whose background is the color of its package.
+color-cursor-text = #1e1e1e
+```
+
+Colors are either fixed, as `#rrggbb`, or taken from the terminal theme, as one of its 16 colors
+(`black`, `red`, `green`, `yellow`, `blue`, `magenta`, `cyan`, `white`, or the same with
+`bright-` in front), a 256-color palette index such as `208`, or `default` for the terminal's text
+color. The defaults are fixed because themes often remap their colors: Monokai Pro, for one,
+shows `blue` as orange. An invalid setting makes parui exit with the line at fault.
+
 ### Images
 ![Start Screen](https://user-images.githubusercontent.com/24369412/218350990-96a0f294-9612-4103-b43c-98b7ecfa2428.png)
 ![Info](https://user-images.githubusercontent.com/24369412/218350962-217da502-b8e3-4b0a-9bd7-bafe4e3c92ed.png)

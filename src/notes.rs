@@ -25,6 +25,14 @@ impl Notes {
         Self { path, notes }
     }
 
+    /// No notes, for when they are disabled.
+    pub fn none() -> Self {
+        Self {
+            path: None,
+            notes: HashMap::new(),
+        }
+    }
+
     pub fn get(&self, package: &str) -> Option<&str> {
         self.notes.get(package).map(String::as_str)
     }

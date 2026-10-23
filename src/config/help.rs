@@ -10,9 +10,12 @@ Options:
     -p=<PROGRAM>
         Selects program used to search AUR
         Not guaranteed to work well
-        Default: paru
+        Default: paru, or `program` in the configuration file
     -h
         Print this help and exit
+Configuration:
+    $XDG_CONFIG_HOME/parui/config, by default ~/.config/parui/config
+    See the README for its settings
 Keybinds:
     Both:
        <Escape>
