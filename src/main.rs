@@ -16,7 +16,7 @@ use crossterm::{
     event::{self, Event, KeyCode, KeyModifiers, MouseButton, MouseEventKind},
     terminal::{disable_raw_mode, enable_raw_mode},
 };
-use ignore::{IGNORE_FILE, Ignored};
+use ignore::{IGNORE_FILE, Ignored, PACMAN_CONF};
 use interface::{
     Upgrade, format_results, get_info, group_packages, installed_names, list, list_upgradable,
     search,
@@ -695,7 +695,9 @@ async fn main() -> Result<(), io::Error> {
                             targets.dedup();
 
                             let mut own = ignore::read_own();
-                            let unignore = targets.iter().all(|t| own.contains(t));
+                            // Follow what the list shows, rather than the file, which pacman
+                            // may not read yet.
+                            let unignore = targets.iter().all(|t| ignored.matches(t));
                             if unignore {
                                 own.retain(|p| !targets.contains(p));
                             } else {
@@ -706,53 +708,60 @@ async fn main() -> Result<(), io::Error> {
                                 }
                             }
 
-                            let written = match ignore::write_own(&own, false) {
-                                Ok(true) => Ok(true),
-                                _ => {
-                                    // sudo needs a password, so hand it the terminal meanwhile.
-                                    // Outside raw mode, Ctrl-C at the prompt would also kill
-                                    // parui, so catch SIGINT instead; the handler stays
-                                    // registered, which is harmless as raw mode reports Ctrl-C as
-                                    // a key press rather than a signal.
-                                    let _ = tokio::signal::unix::signal(
-                                        tokio::signal::unix::SignalKind::interrupt(),
-                                    );
-                                    disable_raw_mode()?;
-                                    stream_exit!(terminal.backend_mut())?;
-                                    terminal.show_cursor()?;
-                                    println!("Updating {IGNORE_FILE} needs sudo.");
-
-                                    let written = ignore::write_own(&own, true);
-
-                                    enable_raw_mode()?;
-                                    stream_enter!(terminal.backend_mut())?;
-                                    terminal.clear()?;
-                                    written
+                            let update = if ignore::is_included() {
+                                match ignore::write_own(&own, false) {
+                                    Ok(true) => Update::Done,
+                                    _ => outside_tui(&mut terminal, || {
+                                        println!("Updating {IGNORE_FILE} needs sudo.");
+                                        Update::from(ignore::write_own(&own, true))
+                                    })?,
                                 }
+                            } else {
+                                outside_tui(&mut terminal, || {
+                                    println!(
+                                        "pacman only skips the packages in {IGNORE_FILE} once {PACMAN_CONF} includes it."
+                                    );
+                                    print!(
+                                        "Add `Include = {IGNORE_FILE}` to the [options] section of {PACMAN_CONF}? [Y/n] "
+                                    );
+                                    let _ = io::stdout().flush();
+                                    let mut answer = String::new();
+                                    let _ = io::stdin().read_line(&mut answer);
+                                    if !matches!(answer.trim(), "" | "y" | "Y" | "yes") {
+                                        return Update::Declined;
+                                    }
+
+                                    Update::from(ignore::write_own(&own, true).and_then(|ok| {
+                                        if ok { ignore::add_include() } else { Ok(false) }
+                                    }))
+                                })?
                             };
 
-                            // Check against what pacman actually reads, which catches a missing
-                            // `Include` and entries from other configuration files.
+                            // Check against what pacman actually reads, which catches entries
+                            // from other configuration files.
                             ignored = Ignored::load();
-                            notice = match written {
-                                Ok(true) => targets
+                            notice = match update {
+                                Update::Done => targets
                                     .iter()
                                     .find(|t| ignored.matches(t) == unignore)
                                     .map(|t| {
                                         if unignore {
                                             format!(
-                                                "{t} is still ignored by another pacman config file, such as /etc/pacman.conf"
+                                                "{t} is still ignored by another pacman config file, such as {PACMAN_CONF}"
                                             )
                                         } else {
                                             format!(
-                                                "pacman does not read {IGNORE_FILE} yet: add `Include = {IGNORE_FILE}` to [options] in /etc/pacman.conf"
+                                                "pacman does not read {IGNORE_FILE}: check its Include in {PACMAN_CONF}"
                                             )
                                         }
                                     }),
-                                Ok(false) => {
+                                Update::Declined => Some(format!(
+                                    "Nothing changed: {PACMAN_CONF} does not include {IGNORE_FILE}"
+                                )),
+                                Update::SudoFailed => {
                                     Some("Could not update ignored packages: sudo failed".into())
                                 }
-                                Err(err) => {
+                                Update::Error(err) => {
                                     Some(format!("Could not update ignored packages: {err}"))
                                 }
                             };
@@ -892,4 +901,45 @@ fn within_info(size: Size, row: u16, col: u16) -> bool {
         && col < size.width.saturating_sub(3)
         && row >= 5
         && row < size.height.saturating_sub(2)
+}
+
+/// Outcome of updating the ignored packages.
+enum Update {
+    Done,
+    Declined,
+    SudoFailed,
+    Error(io::Error),
+}
+
+impl From<io::Result<bool>> for Update {
+    fn from(result: io::Result<bool>) -> Self {
+        match result {
+            Ok(true) => Update::Done,
+            Ok(false) => Update::SudoFailed,
+            Err(err) => Update::Error(err),
+        }
+    }
+}
+
+/// Hands the terminal back to the shell while `f` runs, for prompts such as sudo's password.
+fn outside_tui<T>(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    f: impl FnOnce() -> T,
+) -> io::Result<T> {
+    // Outside raw mode, Ctrl-C at a prompt would also kill parui, so catch SIGINT instead. The
+    // handler stays registered, which is harmless as raw mode reports Ctrl-C as a key press rather
+    // than a signal.
+    let _ = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt());
+
+    disable_raw_mode()?;
+    stream_exit!(terminal.backend_mut())?;
+    terminal.show_cursor()?;
+
+    let out = f();
+
+    enable_raw_mode()?;
+    stream_enter!(terminal.backend_mut())?;
+    terminal.clear()?;
+
+    Ok(out)
 }

@@ -47,6 +47,13 @@ parui adopts vim-like keybinds.
 | x                      | Select | Ignore/unignore selected packages in upgrades |
 | q                      | Select | Exits parui                                   |
 
+### Ignoring packages
+
+`x` toggles the selected packages in `/etc/pacman.d/parui-ignore.conf`, a list of `IgnorePkg`
+entries, so that pacman, paru and `<S-U>` skip them when upgrading. Ignored packages are shown
+crossed out. The first time, parui offers to include that file from the `[options]` section of
+`/etc/pacman.conf`. Both files are written through sudo.
+
 ### Images
 ![Start Screen](https://user-images.githubusercontent.com/24369412/218350990-96a0f294-9612-4103-b43c-98b7ecfa2428.png)
 ![Info](https://user-images.githubusercontent.com/24369412/218350962-217da502-b8e3-4b0a-9bd7-bafe4e3c92ed.png)

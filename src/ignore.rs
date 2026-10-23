@@ -7,6 +7,8 @@ use std::{
 /// included from the `[options]` section of `/etc/pacman.conf`.
 pub const IGNORE_FILE: &str = "/etc/pacman.d/parui-ignore.conf";
 
+pub const PACMAN_CONF: &str = "/etc/pacman.conf";
+
 /// The `IgnorePkg` patterns pacman effectively uses, from every configuration file.
 pub struct Ignored {
     patterns: Vec<String>,
@@ -95,14 +97,77 @@ fn render_own(packages: &[String]) -> String {
     content
 }
 
-/// Writes `packages` to [`IGNORE_FILE`] through `sudo tee`. Without `interactive`, sudo fails
-/// instead of asking for a password.
+/// Writes `packages` to [`IGNORE_FILE`]. Without `interactive`, sudo fails instead of asking for
+/// a password.
 pub fn write_own(packages: &[String], interactive: bool) -> io::Result<bool> {
+    sudo_write(IGNORE_FILE, &render_own(packages), interactive)
+}
+
+/// Whether the `[options]` section of [`PACMAN_CONF`] includes [`IGNORE_FILE`].
+pub fn is_included() -> bool {
+    std::fs::read_to_string(PACMAN_CONF).is_ok_and(|conf| includes_own(&conf))
+}
+
+fn includes_own(conf: &str) -> bool {
+    let mut in_options = false;
+    conf.lines().map(str::trim).any(|line| {
+        if line.starts_with('[') {
+            in_options = line == "[options]";
+            return false;
+        }
+        in_options
+            && line
+                .strip_prefix("Include")
+                .and_then(|rest| rest.trim().strip_prefix('='))
+                .is_some_and(|path| path.trim() == IGNORE_FILE)
+    })
+}
+
+/// `conf` with an `Include` of [`IGNORE_FILE`] right below its `[options]` header, or `None` if
+/// it has no `[options]` section.
+fn with_include(conf: &str) -> Option<String> {
+    let mut out = String::with_capacity(conf.len() + 64);
+    let mut inserted = false;
+    for line in conf.split_inclusive('\n') {
+        out.push_str(line);
+        if !inserted && line.trim() == "[options]" {
+            if !line.ends_with('\n') {
+                out.push('\n');
+            }
+            out.push_str(&format!("# Added by parui\nInclude = {IGNORE_FILE}\n"));
+            inserted = true;
+        }
+    }
+    inserted.then_some(out)
+}
+
+/// Adds an `Include` of [`IGNORE_FILE`] to [`PACMAN_CONF`], asking sudo for a password if needed.
+///
+/// The new content is written next to it and renamed over it, so an interruption cannot leave a
+/// truncated `pacman.conf` behind.
+pub fn add_include() -> io::Result<bool> {
+    let conf = std::fs::read_to_string(PACMAN_CONF)?;
+    let Some(conf) = with_include(&conf) else {
+        return Err(io::Error::other(format!(
+            "{PACMAN_CONF} has no [options] section"
+        )));
+    };
+
+    let staged = format!("{PACMAN_CONF}.parui-new");
+    Ok(sudo_write(&staged, &conf, true)?
+        && Command::new("sudo")
+            .args(["mv", "-f", &staged, PACMAN_CONF])
+            .status()?
+            .success())
+}
+
+/// Writes `content` to `path` through `sudo tee`.
+fn sudo_write(path: &str, content: &str, interactive: bool) -> io::Result<bool> {
     let mut cmd = Command::new("sudo");
     if !interactive {
         cmd.arg("-n");
     }
-    cmd.args(["tee", IGNORE_FILE])
+    cmd.args(["tee", path])
         .stdin(Stdio::piped())
         .stdout(Stdio::null());
     if !interactive {
@@ -115,7 +180,7 @@ pub fn write_own(packages: &[String], interactive: bool) -> io::Result<bool> {
         .stdin
         .take()
         .expect("stdin is piped")
-        .write_all(render_own(packages).as_bytes())?;
+        .write_all(content.as_bytes())?;
 
     Ok(child.wait()?.success())
 }
@@ -146,5 +211,29 @@ mod tests {
             parse_own("IgnorePkg=a b\n  IgnorePkg   =  c\n#IgnorePkg = d\n"),
             ["a", "b", "c"]
         );
+    }
+
+    #[test]
+    fn adds_include_to_options() {
+        let conf = "# comment\n[options]\nHoldPkg = pacman\n\n[core]\nInclude = /etc/pacman.d/mirrorlist\n";
+        assert!(!includes_own(conf));
+
+        let with = with_include(conf).unwrap();
+        assert!(includes_own(&with));
+        assert_eq!(
+            with,
+            format!(
+                "# comment\n[options]\n# Added by parui\nInclude = {IGNORE_FILE}\nHoldPkg = pacman\n\n[core]\nInclude = /etc/pacman.d/mirrorlist\n"
+            )
+        );
+
+        assert!(with_include("[core]\n").is_none());
+        // Only an Include in [options] counts.
+        assert!(!includes_own(&format!(
+            "[options]\n[core]\nInclude = {IGNORE_FILE}\n"
+        )));
+        assert!(!includes_own(&format!(
+            "[options]\n#Include = {IGNORE_FILE}\n"
+        )));
     }
 }
