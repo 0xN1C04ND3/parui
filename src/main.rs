@@ -348,19 +348,21 @@ async fn main() -> Result<(), io::Error> {
                     },
                 );
 
+                let info_area = Rect {
+                    x: size.width / 2 + 2,
+                    y: 6 + hint_lines,
+                    width: size.width / 2 - 5,
+                    height: (area.y + area.height - 1).saturating_sub(6 + hint_lines),
+                };
                 // TODO: Use render_widget_ref when it is ready.
-                let info = Paragraph::new(info)
-                    .wrap(Wrap { trim: false })
-                    .scroll((info_scroll, 0));
-                f.render_widget(
-                    info,
-                    Rect {
-                        x: size.width / 2 + 2,
-                        y: 6 + hint_lines,
-                        width: size.width / 2 - 5,
-                        height: (area.y + area.height - 1).saturating_sub(6 + hint_lines),
-                    },
-                );
+                let info = Paragraph::new(info).wrap(Wrap { trim: false });
+                // Stop scrolling once the last line is at the bottom, which also takes back
+                // scrolling past it after a resize.
+                let max_scroll = u16::try_from(info.line_count(info_area.width))
+                    .unwrap_or(u16::MAX)
+                    .saturating_sub(info_area.height);
+                info_scroll = info_scroll.min(max_scroll);
+                f.render_widget(info.scroll((info_scroll, 0)), info_area);
 
                 let current_package = all_packages
                     .get()

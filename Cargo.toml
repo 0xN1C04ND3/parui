@@ -41,7 +41,7 @@ features = ["process", "rt-multi-thread", "time", "macros", "sync", "signal"]
 [dependencies.tui]
 package = "ratatui"
 version = "0.30"
-features = ["crossterm"]
+features = ["crossterm", "unstable-rendered-line-info"]
 
 [dependencies.ureq]
 version = "3"
