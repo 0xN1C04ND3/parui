@@ -225,6 +225,7 @@ const UPGRADABLE_COLOR: Color = Color::Rgb(0xff, 0x9e, 0x40);
 const INSTALLED_COLOR: Color = Color::Rgb(0x8c, 0xd8, 0x5a);
 const UNINSTALLED_COLOR: Color = Color::Rgb(0x5c, 0xa8, 0xff);
 const CURRENT_FG_COLOR: Color = Color::Rgb(0x1e, 0x1e, 0x1e);
+const NOTE_LABEL_COLOR: Color = Color::Rgb(0x9a, 0x9a, 0x9a);
 
 #[allow(clippy::too_many_arguments)]
 pub fn format_results<'line>(
@@ -313,8 +314,8 @@ pub fn format_results<'line>(
     );
 
     const HAS_NOTE: Span = Span {
-        content: Cow::Borrowed(" ✎"),
-        style: style!(Color::Gray),
+        content: Cow::Borrowed(" Note"),
+        style: style! { fg: NOTE_LABEL_COLOR, mod: Modifier::ITALIC, },
     };
 
     const SELECTED: Span = Span {
