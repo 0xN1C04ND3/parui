@@ -19,7 +19,7 @@ use tui::{
     text::{Line, Span},
 };
 
-use crate::{matcher::Matcher, shown::Shown};
+use crate::{ignore::Ignored, matcher::Matcher, shown::Shown};
 
 pub async fn list(show_aur: bool) -> FixedCompactStrings {
     let mut cmd = Command::new("pacman");
@@ -237,6 +237,7 @@ pub fn format_results<'line>(
     skip: usize,
     installed: &IntSet<usize>,
     upgradable: &IntMap<usize, Upgrade>,
+    ignored: &Ignored,
 ) -> Vec<Line<'line>> {
     use crate::{cows, style};
 
@@ -270,17 +271,25 @@ pub fn format_results<'line>(
     };
     const DEFAULT_STYLE: Style = style!();
 
-    let package_style = |idx: usize, is_current: bool| match (
-        upgradable.contains_key(&idx),
-        installed.contains(&idx),
-        is_current,
-    ) {
-        (true, _, true) => UPGRADABLE_CURRENT_STYLE,
-        (true, _, false) => UPGRADABLE_STYLE,
-        (false, true, true) => INSTALLED_CURRENT_STYLE,
-        (false, true, false) => INSTALLED_STYLE,
-        (false, false, true) => UNINSTALLED_CURRENT_STYLE,
-        (false, false, false) => UNINSTALLED_STYLE,
+    let package_style = |idx: usize, name: &str, is_current: bool| {
+        let style = match (
+            upgradable.contains_key(&idx),
+            installed.contains(&idx),
+            is_current,
+        ) {
+            (true, _, true) => UPGRADABLE_CURRENT_STYLE,
+            (true, _, false) => UPGRADABLE_STYLE,
+            (false, true, true) => INSTALLED_CURRENT_STYLE,
+            (false, true, false) => INSTALLED_STYLE,
+            (false, false, true) => UNINSTALLED_CURRENT_STYLE,
+            (false, false, false) => UNINSTALLED_STYLE,
+        };
+
+        if ignored.matches(name) {
+            style.add_modifier(Modifier::CROSSED_OUT)
+        } else {
+            style
+        }
     };
 
     const PADDINGS: [Cow<'static, str>; 16] = cows!(
@@ -325,7 +334,7 @@ pub fn format_results<'line>(
                 };
                 let line_span = Span::styled(
                     &packages[package_idx],
-                    package_style(real_index, current == index - 1),
+                    package_style(real_index, &packages[package_idx], current == index - 1),
                 );
 
                 let spans = if selected.contains(&real_index) {
@@ -347,7 +356,7 @@ pub fn format_results<'line>(
                     content: PADDINGS[pad_to - (i + 1).ilog10() as usize].clone(),
                     style: DEFAULT_STYLE,
                 };
-                let line_span = Span::styled(line, package_style(i, current == i));
+                let line_span = Span::styled(line, package_style(i, line, current == i));
 
                 let spans = if selected.contains(&i) {
                     vec![index_span, padding_span, line_span, SELECTED]

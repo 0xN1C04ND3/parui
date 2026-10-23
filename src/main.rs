@@ -16,6 +16,7 @@ use crossterm::{
     event::{self, Event, KeyCode, KeyModifiers, MouseButton, MouseEventKind},
     terminal::{disable_raw_mode, enable_raw_mode},
 };
+use ignore::{IGNORE_FILE, Ignored};
 use interface::{
     Upgrade, format_results, get_info, group_packages, installed_names, list, list_upgradable,
     search,
@@ -35,6 +36,7 @@ use tui::{
 };
 
 mod config;
+mod ignore;
 mod interface;
 mod macros;
 mod matcher;
@@ -77,6 +79,9 @@ async fn main() -> Result<(), io::Error> {
     let installed: Arc<OnceLock<IntSet<usize>>> = Arc::new(OnceLock::new());
     let upgradable: Arc<OnceLock<IntMap<usize, Upgrade>>> = Arc::new(OnceLock::new());
     let error_msg = Arc::new(Atomic::new(Message::TrySearch));
+    let mut ignored = Ignored::load();
+    // Shown below the package list until the next key press.
+    let mut notice: Option<String> = None;
 
     let shown_len = || {
         shown
@@ -212,11 +217,15 @@ async fn main() -> Result<(), io::Error> {
                     &mut title_state,
                 );
 
+                let mut list_block = Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(shown_color))
+                    .border_type(BorderType::Rounded);
+                if let Some(notice) = &notice {
+                    list_block = list_block.title_bottom(format!(" {notice} ").yellow().bold());
+                }
                 f.render_widget(
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .border_style(Style::default().fg(shown_color))
-                        .border_type(BorderType::Rounded),
+                    list_block,
                     Rect {
                         x: 0,
                         y: 3,
@@ -262,6 +271,7 @@ async fn main() -> Result<(), io::Error> {
                         skipped,
                         installed,
                         upgradable,
+                        &ignored,
                     );
                     f.render_widget(
                         Paragraph::new(formatted).alignment(Alignment::Left),
@@ -306,11 +316,17 @@ async fn main() -> Result<(), io::Error> {
                         .yellow()
                         .bold()
                         .into(),
+                    "Press x to ignore/unignore selected packages in upgrades"
+                        .magenta()
+                        .bold()
+                        .into(),
                 ];
+                let hint_lines = actions.len() as u16;
                 if no_info {
                     actions.push(Line::default());
                     actions.push("Finding info...".gray().into());
                 }
+                let actions_height = actions.len() as u16;
                 let actions = Paragraph::new(actions).alignment(Alignment::Left);
                 f.render_widget(
                     actions,
@@ -318,7 +334,7 @@ async fn main() -> Result<(), io::Error> {
                         x: size.width / 2 + 2,
                         y: 5,
                         width: size.width / 2 - 5,
-                        height: 3 + no_info as u16 * 2,
+                        height: actions_height,
                     },
                 );
 
@@ -330,9 +346,9 @@ async fn main() -> Result<(), io::Error> {
                     info,
                     Rect {
                         x: size.width / 2 + 2,
-                        y: 9 - no_info as u16,
+                        y: 6 + hint_lines,
                         width: size.width / 2 - 5,
-                        height: size.height - 11 - no_info as u16,
+                        height: size.height.saturating_sub(8 + hint_lines),
                     },
                 );
             })?;
@@ -357,6 +373,10 @@ async fn main() -> Result<(), io::Error> {
         }
 
         let e = event::read()?;
+
+        if matches!(e, Event::Key(_)) && notice.take().is_some() {
+            redraw.store(true, Ordering::SeqCst);
+        }
 
         match e {
             Event::Resize(..) => redraw.store(true, Ordering::SeqCst),
@@ -662,6 +682,81 @@ async fn main() -> Result<(), io::Error> {
                             let _ = cmd.exec();
 
                             return Ok(());
+                        }
+                        'x' => {
+                            let packages = all_packages.get().unwrap();
+                            let mut targets: Vec<String> = if selected.is_empty() {
+                                vec![packages[real_idx(current)].to_owned()]
+                            } else {
+                                selected.iter().map(|&i| packages[i].to_owned()).collect()
+                            };
+                            // Packages available from several sources appear more than once.
+                            targets.sort_unstable();
+                            targets.dedup();
+
+                            let mut own = ignore::read_own();
+                            let unignore = targets.iter().all(|t| own.contains(t));
+                            if unignore {
+                                own.retain(|p| !targets.contains(p));
+                            } else {
+                                for target in &targets {
+                                    if !own.contains(target) {
+                                        own.push(target.clone());
+                                    }
+                                }
+                            }
+
+                            let written = match ignore::write_own(&own, false) {
+                                Ok(true) => Ok(true),
+                                _ => {
+                                    // sudo needs a password, so hand it the terminal meanwhile.
+                                    // Outside raw mode, Ctrl-C at the prompt would also kill
+                                    // parui, so catch SIGINT instead; the handler stays
+                                    // registered, which is harmless as raw mode reports Ctrl-C as
+                                    // a key press rather than a signal.
+                                    let _ = tokio::signal::unix::signal(
+                                        tokio::signal::unix::SignalKind::interrupt(),
+                                    );
+                                    disable_raw_mode()?;
+                                    stream_exit!(terminal.backend_mut())?;
+                                    terminal.show_cursor()?;
+                                    println!("Updating {IGNORE_FILE} needs sudo.");
+
+                                    let written = ignore::write_own(&own, true);
+
+                                    enable_raw_mode()?;
+                                    stream_enter!(terminal.backend_mut())?;
+                                    terminal.clear()?;
+                                    written
+                                }
+                            };
+
+                            // Check against what pacman actually reads, which catches a missing
+                            // `Include` and entries from other configuration files.
+                            ignored = Ignored::load();
+                            notice = match written {
+                                Ok(true) => targets
+                                    .iter()
+                                    .find(|t| ignored.matches(t) == unignore)
+                                    .map(|t| {
+                                        if unignore {
+                                            format!(
+                                                "{t} is still ignored by another pacman config file, such as /etc/pacman.conf"
+                                            )
+                                        } else {
+                                            format!(
+                                                "pacman does not read {IGNORE_FILE} yet: add `Include = {IGNORE_FILE}` to [options] in /etc/pacman.conf"
+                                            )
+                                        }
+                                    }),
+                                Ok(false) => {
+                                    Some("Could not update ignored packages: sudo failed".into())
+                                }
+                                Err(err) => {
+                                    Some(format!("Could not update ignored packages: {err}"))
+                                }
+                            };
+                            redraw.store(true, Ordering::SeqCst);
                         }
                         'R' => {
                             let mut has_any = false;

@@ -53,6 +53,8 @@ Keybinds:
            Remove selected packages
        <S-U>
            Upgrade the whole system
+       x
+           Ignore/unignore selected packages in upgrades
        q
            Exit parui"#
     );

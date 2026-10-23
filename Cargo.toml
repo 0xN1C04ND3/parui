@@ -36,7 +36,7 @@ features = ["events"]
 
 [dependencies.tokio]
 version = "1"
-features = ["process", "rt-multi-thread", "time", "macros", "sync"]
+features = ["process", "rt-multi-thread", "time", "macros", "sync", "signal"]
 
 [dependencies.tui]
 package = "ratatui"
