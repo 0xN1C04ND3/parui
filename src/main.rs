@@ -16,10 +16,13 @@ use crossterm::{
     event::{self, Event, KeyCode, KeyModifiers, MouseButton, MouseEventKind},
     terminal::{disable_raw_mode, enable_raw_mode},
 };
-use interface::{check_installed, format_results, get_info, list, search};
+use interface::{
+    Upgrade, format_results, get_info, group_packages, installed_names, list, list_upgradable,
+    search,
+};
 use message::Message;
 use mode::Mode;
-use nohash_hasher::IntSet;
+use nohash_hasher::{IntMap, IntSet};
 use parking_lot::{Mutex, RwLock};
 use shown::Shown;
 use tui::{
@@ -72,6 +75,7 @@ async fn main() -> Result<(), io::Error> {
 
     let all_packages: Arc<OnceLock<FixedCompactStrings>> = Arc::new(OnceLock::new());
     let installed: Arc<OnceLock<IntSet<usize>>> = Arc::new(OnceLock::new());
+    let upgradable: Arc<OnceLock<IntMap<usize, Upgrade>>> = Arc::new(OnceLock::new());
     let error_msg = Arc::new(Atomic::new(Message::TrySearch));
 
     let shown_len = || {
@@ -91,6 +95,7 @@ async fn main() -> Result<(), io::Error> {
         let command = command.clone();
         let all_packages = all_packages.clone();
         let installed = installed.clone();
+        let upgradable = upgradable.clone();
 
         Some(tokio::spawn(async move {
             if query.is_empty() {
@@ -102,9 +107,12 @@ async fn main() -> Result<(), io::Error> {
             redraw.store(true, Ordering::SeqCst);
 
             if all_packages.get().is_none() {
-                let result = list(command != "pacman").await;
-                installed.get_or_init(|| check_installed(&result));
-                all_packages.get_or_init(|| result);
+                let (result, upgrades) =
+                    tokio::join!(list(command != "pacman"), list_upgradable(&command));
+                let grouped = group_packages(&result, &installed_names(), &upgrades);
+                installed.get_or_init(|| grouped.installed);
+                upgradable.get_or_init(|| grouped.upgradable);
+                all_packages.get_or_init(|| grouped.packages);
             }
 
             search(&query, all_packages.get().unwrap(), shown.clone());
@@ -152,6 +160,7 @@ async fn main() -> Result<(), io::Error> {
                 let redraw = redraw.clone();
                 let info = info.clone();
                 let installed = installed.clone();
+                let upgradable = upgradable.clone();
                 let all_packages = all_packages.clone();
                 if let Some(search_task) = search_task.take() {
                     search_task.abort();
@@ -162,6 +171,7 @@ async fn main() -> Result<(), io::Error> {
                         all_packages.get().unwrap(),
                         real_idx,
                         installed.get().unwrap(),
+                        upgradable.get().unwrap(),
                         &command,
                     )
                     .await;
@@ -239,20 +249,20 @@ async fn main() -> Result<(), io::Error> {
 
                 // this is technically stateful, but it is hard to incrementally update so we will
                 // reconstruct it instead.
-                if let Some(formatted) = all_packages.get().and_then(|all_packages| {
-                    installed.get().map(|installed| {
-                        format_results(
-                            all_packages,
-                            shown.clone(),
-                            current,
-                            &selected,
-                            size.height as usize,
-                            shown_len_str_len,
-                            skipped,
-                            installed,
-                        )
-                    })
-                }) {
+                if let (Some(all_packages), Some(installed), Some(upgradable)) =
+                    (all_packages.get(), installed.get(), upgradable.get())
+                {
+                    let formatted = format_results(
+                        all_packages,
+                        shown.clone(),
+                        current,
+                        &selected,
+                        size.height as usize,
+                        shown_len_str_len,
+                        skipped,
+                        installed,
+                        upgradable,
+                    );
                     f.render_widget(
                         Paragraph::new(formatted).alignment(Alignment::Left),
                         Rect {

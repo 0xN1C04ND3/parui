@@ -1,9 +1,8 @@
 use std::{
     borrow::Cow,
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     ffi::OsStr,
     fs::{File, FileType},
-    hash::{BuildHasherDefault, DefaultHasher},
     io::{BufRead, BufReader, Seek},
     sync::Arc,
     time::Duration,
@@ -11,7 +10,7 @@ use std::{
 
 use compact_strings::FixedCompactStrings;
 use flate2::bufread::GzDecoder;
-use nohash_hasher::IntSet;
+use nohash_hasher::{IntMap, IntSet};
 use parking_lot::RwLock;
 use regex::Regex;
 use tokio::{join, process::Command, time::sleep};
@@ -77,6 +76,106 @@ pub async fn list(show_aur: bool) -> FixedCompactStrings {
     out
 }
 
+#[derive(Clone)]
+pub struct Upgrade {
+    pub old: String,
+    pub new: String,
+}
+
+/// Packages with a newer version available, keyed by name, as reported by `<command> -Qu`.
+///
+/// Repository packages are compared against the local sync database, so this is only as fresh
+/// as the last `pacman -Sy`.
+pub async fn list_upgradable(command: &str) -> HashMap<String, Upgrade> {
+    let mut cmd = Command::new(command);
+    cmd.arg("-Qu");
+
+    parse_upgrades(&cmd_output(cmd).await)
+}
+
+/// Parses `-Qu` output, where each line looks like `name old -> new`, optionally followed by
+/// ` [ignored]`.
+fn parse_upgrades(output: &str) -> HashMap<String, Upgrade> {
+    output
+        .lines()
+        .filter_map(|line| {
+            let mut parts = line.split_whitespace();
+            let name = parts.next()?;
+            let old = parts.next()?;
+            if parts.next()? != "->" {
+                return None;
+            }
+            let new = parts.next()?;
+            Some((
+                name.to_owned(),
+                Upgrade {
+                    old: old.to_owned(),
+                    new: new.to_owned(),
+                },
+            ))
+        })
+        .collect()
+}
+
+pub struct Grouped {
+    pub packages: FixedCompactStrings,
+    pub installed: IntSet<usize>,
+    pub upgradable: IntMap<usize, Upgrade>,
+}
+
+/// Reorders `packages` into upgradable, then installed, then not installed packages, keeping the
+/// original order within each group, and returns the indices of each group in the new order.
+///
+/// `installed` contains the upgradable packages too.
+pub fn group_packages(
+    packages: &FixedCompactStrings,
+    installed: &HashSet<String>,
+    upgrades: &HashMap<String, Upgrade>,
+) -> Grouped {
+    #[derive(PartialEq, Eq, Clone, Copy)]
+    enum Group {
+        Upgradable,
+        Installed,
+        NotInstalled,
+    }
+
+    let group_of = |package: &str| {
+        if !installed.contains(package) {
+            Group::NotInstalled
+        } else if upgrades.contains_key(package) {
+            Group::Upgradable
+        } else {
+            Group::Installed
+        }
+    };
+    let groups: Vec<Group> = packages.iter().map(group_of).collect();
+
+    let mut out = Grouped {
+        packages: FixedCompactStrings::with_capacity(packages.capacity(), packages.len()),
+        installed: IntSet::default(),
+        upgradable: IntMap::default(),
+    };
+
+    for group in [Group::Upgradable, Group::Installed, Group::NotInstalled] {
+        for (package, _) in packages.iter().zip(&groups).filter(|(_, g)| **g == group) {
+            let idx = out.packages.len();
+            match group {
+                Group::Upgradable => {
+                    out.installed.insert(idx);
+                    out.upgradable.insert(idx, upgrades[package].clone());
+                }
+                Group::Installed => {
+                    out.installed.insert(idx);
+                }
+                Group::NotInstalled => (),
+            }
+            out.packages.push(package);
+        }
+    }
+
+    out
+}
+
 pub fn search(query: &str, packages: &FixedCompactStrings, shown: Arc<RwLock<Shown>>) {
     let query = query.trim();
     if query.is_empty() || query == ".*" || query == "." {
@@ -120,6 +219,13 @@ pub fn search(query: &str, packages: &FixedCompactStrings, shown: Arc<RwLock<Sho
     }
 }
 
+// Explicit RGB colors, because terminal themes remap the ANSI palette freely (Monokai Pro, for
+// one, renders ANSI blue as orange), which would make the package groups indistinguishable.
+const UPGRADABLE_COLOR: Color = Color::Rgb(0xff, 0x9e, 0x40);
+const INSTALLED_COLOR: Color = Color::Rgb(0x8c, 0xd8, 0x5a);
+const UNINSTALLED_COLOR: Color = Color::Rgb(0x5c, 0xa8, 0xff);
+const CURRENT_FG_COLOR: Color = Color::Rgb(0x1e, 0x1e, 0x1e);
+
 #[allow(clippy::too_many_arguments)]
 pub fn format_results<'line>(
     packages: &'line FixedCompactStrings,
@@ -130,29 +236,52 @@ pub fn format_results<'line>(
     pad_to: usize,
     skip: usize,
     installed: &IntSet<usize>,
+    upgradable: &IntMap<usize, Upgrade>,
 ) -> Vec<Line<'line>> {
     use crate::{cows, style};
 
     const INDEX_STYLE: Style = style!(Color::Gray);
-    const INSTALLED_STYLE: Style = style! {
-        fg: Color::Green,
+    const UPGRADABLE_STYLE: Style = style! {
+        fg: UPGRADABLE_COLOR,
         mod: Modifier::BOLD,
     };
-    const INSTALLED_SELECTED_STYLE: Style = style! {
-        fg: Color::Yellow,
-        bg: Color::Red,
+    const UPGRADABLE_CURRENT_STYLE: Style = style! {
+        fg: CURRENT_FG_COLOR,
+        bg: UPGRADABLE_COLOR,
+        mod: Modifier::BOLD,
+    };
+    const INSTALLED_STYLE: Style = style! {
+        fg: INSTALLED_COLOR,
+        mod: Modifier::BOLD,
+    };
+    const INSTALLED_CURRENT_STYLE: Style = style! {
+        fg: CURRENT_FG_COLOR,
+        bg: INSTALLED_COLOR,
         mod: Modifier::BOLD,
     };
     const UNINSTALLED_STYLE: Style = style! {
-        fg: Color::LightBlue,
+        fg: UNINSTALLED_COLOR,
         mod: Modifier::BOLD,
     };
-    const UNINSTALLED_SELECTED_STYLE: Style = style! {
-        fg: Color::Blue,
-        bg: Color::Red,
+    const UNINSTALLED_CURRENT_STYLE: Style = style! {
+        fg: CURRENT_FG_COLOR,
+        bg: UNINSTALLED_COLOR,
         mod: Modifier::BOLD,
     };
     const DEFAULT_STYLE: Style = style!();
+
+    let package_style = |idx: usize, is_current: bool| match (
+        upgradable.contains_key(&idx),
+        installed.contains(&idx),
+        is_current,
+    ) {
+        (true, _, true) => UPGRADABLE_CURRENT_STYLE,
+        (true, _, false) => UPGRADABLE_STYLE,
+        (false, true, true) => INSTALLED_CURRENT_STYLE,
+        (false, true, false) => INSTALLED_STYLE,
+        (false, false, true) => UNINSTALLED_CURRENT_STYLE,
+        (false, false, false) => UNINSTALLED_STYLE,
+    };
 
     const PADDINGS: [Cow<'static, str>; 16] = cows!(
         "",
@@ -196,12 +325,7 @@ pub fn format_results<'line>(
                 };
                 let line_span = Span::styled(
                     &packages[package_idx],
-                    match (installed.contains(&real_index), current == index - 1) {
-                        (true, true) => INSTALLED_SELECTED_STYLE,
-                        (true, false) => INSTALLED_STYLE,
-                        (false, true) => UNINSTALLED_SELECTED_STYLE,
-                        (false, false) => UNINSTALLED_STYLE,
-                    },
+                    package_style(real_index, current == index - 1),
                 );
 
                 let spans = if selected.contains(&real_index) {
@@ -223,15 +347,7 @@ pub fn format_results<'line>(
                     content: PADDINGS[pad_to - (i + 1).ilog10() as usize].clone(),
                     style: DEFAULT_STYLE,
                 };
-                let line_span = Span::styled(
-                    line,
-                    match (installed.contains(&i), current == i) {
-                        (true, true) => INSTALLED_SELECTED_STYLE,
-                        (true, false) => INSTALLED_STYLE,
-                        (false, true) => UNINSTALLED_SELECTED_STYLE,
-                        (false, false) => UNINSTALLED_STYLE,
-                    },
-                );
+                let line_span = Span::styled(line, package_style(i, current == i));
 
                 let spans = if selected.contains(&i) {
                     vec![index_span, padding_span, line_span, SELECTED]
@@ -248,6 +364,7 @@ pub async fn get_info<'line>(
     all_packages: &FixedCompactStrings,
     index: usize,
     installed_cache: &IntSet<usize>,
+    upgradable: &IntMap<usize, Upgrade>,
     command: &str,
 ) -> Vec<Line<'line>> {
     if index >= all_packages.len() {
@@ -278,7 +395,20 @@ pub async fn get_info<'line>(
         sub_modifier: Modifier::empty(),
     };
 
-    let mut info = Vec::with_capacity(lines.len());
+    let mut info = Vec::with_capacity(lines.len() + 1);
+    if let Some(upgrade) = upgradable.get(&index) {
+        info.push(Line::from(vec![
+            Span::styled("Upgrade available:", KEY_STYLE),
+            Span::styled(
+                format!(" {} -> {}", upgrade.old, upgrade.new),
+                Style::new()
+                    .fg(UPGRADABLE_COLOR)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]));
+        info.push(Line::default());
+    }
+
     for mut line in lines {
         if line.starts_with(' ') {
             info.push(Line::from(line));
@@ -297,16 +427,15 @@ pub async fn get_info<'line>(
     info
 }
 
-pub fn check_installed(packages: &FixedCompactStrings) -> IntSet<usize> {
+/// Names of all installed packages, read from the local pacman database.
+pub fn installed_names() -> HashSet<String> {
     const DIR: &str = "/var/lib/pacman/local/";
 
     let Ok(dir) = std::fs::read_dir(DIR) else {
-        return IntSet::default();
+        return HashSet::default();
     };
 
-    let mut out = IntSet::with_capacity_and_hasher(512, Default::default());
-    let mut set =
-        HashSet::with_capacity_and_hasher(512, BuildHasherDefault::<DefaultHasher>::default());
+    let mut set = HashSet::with_capacity(512);
 
     let mut path = Vec::with_capacity(256);
     let dir_os = OsStr::new(DIR);
@@ -345,14 +474,7 @@ pub fn check_installed(packages: &FixedCompactStrings) -> IntSet<usize> {
         };
     }
 
-    for (pos, _) in packages
-        .iter()
-        .enumerate()
-        .filter(|(_, p)| set.contains(*p))
-    {
-        out.insert(pos);
-    }
-    out
+    set
 }
 
 async fn cmd_output(mut cmd: Command) -> String {
@@ -361,4 +483,52 @@ async fn cmd_output(mut cmd: Command) -> String {
         .ok()
         .and_then(|output| String::from_utf8(output.stdout).ok())
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_upgrades() {
+        let upgrades = parse_upgrades(
+            "kicad 10.0.6-2 -> 10.0.7-2\n\
+             anyrun-git r314.55230c6-1 -> latest-commit\n\
+             linux 6.1-1 -> 6.2-1 [ignored]\n\
+             :: not an upgrade line\n",
+        );
+
+        assert_eq!(upgrades.len(), 3);
+        assert_eq!(upgrades["kicad"].old, "10.0.6-2");
+        assert_eq!(upgrades["kicad"].new, "10.0.7-2");
+        assert_eq!(upgrades["anyrun-git"].new, "latest-commit");
+        assert_eq!(upgrades["linux"].new, "6.2-1");
+    }
+
+    #[test]
+    fn groups_upgradable_then_installed_then_rest() {
+        let mut packages = FixedCompactStrings::with_capacity(64, 8);
+        for p in ["a", "up1", "b", "inst1", "up2", "c", "inst2", "up1"] {
+            packages.push(p);
+        }
+        let installed: HashSet<String> = ["up1", "up2", "inst1", "inst2"]
+            .into_iter()
+            .map(String::from)
+            .collect();
+        let upgrades = parse_upgrades("up1 1 -> 2\nup2 3 -> 4\nnot-listed 5 -> 6\n");
+
+        let grouped = group_packages(&packages, &installed, &upgrades);
+
+        let order: Vec<&str> = grouped.packages.iter().collect();
+        assert_eq!(
+            order,
+            ["up1", "up2", "up1", "inst1", "inst2", "a", "b", "c"]
+        );
+        assert_eq!(
+            grouped.upgradable.keys().copied().collect::<IntSet<_>>(),
+            [0, 1, 2].into_iter().collect()
+        );
+        assert_eq!(grouped.upgradable[&1].new, "4");
+        assert_eq!(grouped.installed, [0, 1, 2, 3, 4].into_iter().collect());
+    }
 }
