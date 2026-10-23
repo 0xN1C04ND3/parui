@@ -43,6 +43,7 @@ parui adopts vim-like keybinds.
 | \<Space\>              | Select | Select/deselect package   |
 | c                      | Select | Clear selections          |
 | \<S-R\>                | Select | Remove selected packages  |
+| \<S-U\>                | Select | Upgrade the whole system  |
 | q                      | Select | Exits parui               |
 
 ### Images

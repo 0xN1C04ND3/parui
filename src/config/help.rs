@@ -51,6 +51,8 @@ Keybinds:
            Clear selections
        <S-R>
            Remove selected packages
+       <S-U>
+           Upgrade the whole system
        q
            Exit parui"#
     );

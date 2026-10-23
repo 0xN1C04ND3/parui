@@ -293,39 +293,32 @@ async fn main() -> Result<(), io::Error> {
                 };
 
                 // TODO: Use render_widget_ref when it is ready.
-                let actions = Paragraph::new(if no_info {
-                    vec![
-                        "Press ENTER to (re)install selected packages"
-                            .green()
-                            .bold()
-                            .into(),
-                        "Press Shift-R to uninstall selected packages"
-                            .red()
-                            .bold()
-                            .into(),
-                        Line::default(),
-                        "Finding info...".gray().into(),
-                    ]
-                } else {
-                    vec![
-                        "Press ENTER to (re)install selected packages"
-                            .green()
-                            .bold()
-                            .into(),
-                        "Press Shift-R to uninstall selected packages"
-                            .red()
-                            .bold()
-                            .into(),
-                    ]
-                })
-                .alignment(Alignment::Left);
+                let mut actions: Vec<Line> = vec![
+                    "Press ENTER to (re)install selected packages"
+                        .green()
+                        .bold()
+                        .into(),
+                    "Press Shift-R to uninstall selected packages"
+                        .red()
+                        .bold()
+                        .into(),
+                    "Press Shift-U to upgrade the whole system"
+                        .yellow()
+                        .bold()
+                        .into(),
+                ];
+                if no_info {
+                    actions.push(Line::default());
+                    actions.push("Finding info...".gray().into());
+                }
+                let actions = Paragraph::new(actions).alignment(Alignment::Left);
                 f.render_widget(
                     actions,
                     Rect {
                         x: size.width / 2 + 2,
                         y: 5,
                         width: size.width / 2 - 5,
-                        height: 2 + no_info as u16 * 2,
+                        height: 3 + no_info as u16 * 2,
                     },
                 );
 
@@ -337,9 +330,9 @@ async fn main() -> Result<(), io::Error> {
                     info,
                     Rect {
                         x: size.width / 2 + 2,
-                        y: 8 - no_info as u16,
+                        y: 9 - no_info as u16,
                         width: size.width / 2 - 5,
-                        height: size.height - 10 - no_info as u16,
+                        height: size.height - 11 - no_info as u16,
                     },
                 );
             })?;
@@ -646,6 +639,27 @@ async fn main() -> Result<(), io::Error> {
                         'c' if k.modifiers.contains(KeyModifiers::CONTROL) => {
                             disable_raw_mode()?;
                             stream_exit!(terminal.backend_mut())?;
+
+                            return Ok(());
+                        }
+                        'U' => {
+                            disable_raw_mode()?;
+                            stream_exit!(terminal.backend_mut())?;
+                            terminal.show_cursor()?;
+                            drop(terminal);
+
+                            if let Some(search_task) = search_task.take() {
+                                search_task.abort();
+                            }
+
+                            // A full upgrade rather than `-S` on the upgradable packages, since
+                            // partial upgrades are unsupported on Arch.
+                            let mut cmd = std::process::Command::new(&command);
+                            cmd.arg("-Syu");
+
+                            println!("Upgrading system.");
+
+                            let _ = cmd.exec();
 
                             return Ok(());
                         }
